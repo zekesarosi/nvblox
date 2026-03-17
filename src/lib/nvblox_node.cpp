@@ -278,10 +278,10 @@ void NvbloxNode::subscribeToTopics()
             std::placeholders::_1, std::placeholders::_2,
             std::placeholders::_3, std::placeholders::_4));
       } else {
-        // Sync only depth image with its camera info
+        // ApproximateTime for depth + camera_info (tolerates relayed topic timestamp drift)
         timesync_depth_.emplace_back(
-          std::make_shared<image_exact_sync>(
-            image_exact_sync(kQueueSize), *depth_image_subs_.back(),
+          std::make_shared<image_approx_sync>(
+            image_approx_sync(kQueueSize), *depth_image_subs_.back(),
             *depth_camera_info_subs_.back()));
 
         timesync_depth_.back()->registerCallback(

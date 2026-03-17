@@ -354,6 +354,10 @@ protected:
     nvidia::isaac_ros::nitros::NitrosImage, sensor_msgs::msg::CameraInfo>;
   using image_exact_sync = ::message_filters::Synchronizer<image_exact_policy>;
 
+  using image_approx_policy = ::message_filters::sync_policies::ApproximateTime<
+    nvidia::isaac_ros::nitros::NitrosImage, sensor_msgs::msg::CameraInfo>;
+  using image_approx_sync = ::message_filters::Synchronizer<image_approx_policy>;
+
   using image_mask_exact_policy = ::message_filters::sync_policies::ExactTime<
     nvidia::isaac_ros::nitros::NitrosImage, sensor_msgs::msg::CameraInfo,
     nvidia::isaac_ros::nitros::NitrosImage, sensor_msgs::msg::CameraInfo>;
@@ -361,7 +365,7 @@ protected:
 
   std::vector<std::shared_ptr<image_mask_approx_sync>> timesync_depth_mask_;
   std::vector<std::shared_ptr<image_mask_exact_sync>> timesync_color_mask_;
-  std::vector<std::shared_ptr<image_exact_sync>> timesync_depth_;
+  std::vector<std::shared_ptr<image_approx_sync>> timesync_depth_;
   std::vector<std::shared_ptr<image_exact_sync>> timesync_color_;
 
 
