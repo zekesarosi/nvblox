@@ -29,37 +29,22 @@ if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
 endif()
 message( STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}" )
 
-# Setup dependencies. Note that will also setup cuda architecture flags in CMAKE_CUDA_ARCHITECTURES
+# Setup dependencies.
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
-include(nvblox_core/cmake/cuda/setup_compute_capability.cmake)
 
-# Default behavior is to build for all supported CUDA architectures. In order to improve build
-# speed we can select to build only for the native architecture by using
-#    colcon build --cmake-args "-DUSE_NATIVE_CUDA_ARCHITECTURE=1"
-# Then the core lib will determine the current cuda architecture for us.
-if(DEFINED USE_NATIVE_CUDA_ARCHITECTURE)
-  unset(CMAKE_CUDA_ARCHITECTURES)
-  message(STATUS "nvblox_ros is built with native CUDA architectures.")
-elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
-  set(CMAKE_CUDA_ARCHITECTURES "87")
-  message(STATUS "nvblox_ros is built for Jetson/Orin CUDA architecture: ${CMAKE_CUDA_ARCHITECTURES}")
+# CUDA architecture detection
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+  set(CMAKE_CUDA_ARCHITECTURES "native")
 else()
-  message(STATUS "nvblox_ros is built for the following CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  set(CMAKE_CUDA_ARCHITECTURES "72;75;80;86;87")
 endif()
 
-
-# Don't build the pytorch wrapper
-set(BUILD_PYTORCH_WRAPPER false)
-
-# Use system version of these dependencies to avoid conflicts
-set(USE_SYSTEM_GLOG true)
-set(USE_SYSTEM_GFLAGS true)
-set(USE_SYSTEM_GTEST true)
-set(USE_SYSTEM_BENCHMARK true)
-
-# The core nvblox lib is built together with nvblox_ros
-add_subdirectory(nvblox_core)
+# Use pre-installed nvblox core libraries (from ros-humble-isaac-ros-nvblox)
+find_package(glog REQUIRED)
+find_package(gflags REQUIRED)
+find_package(nvblox REQUIRED)
+message(STATUS "nvblox_ros: Using installed nvblox core from ${nvblox_DIR}")
 
 ################
 # DEPENDENCIES #
@@ -116,8 +101,8 @@ add_library(${PROJECT_NAME}_lib SHARED
   src/lib/rosbag_data_loader.cpp
   src/lib/rosbag_reading.cpp
 )
-set_nvblox_compiler_options(${PROJECT_NAME}_lib)
-target_link_libraries(${PROJECT_NAME}_lib nvblox_lib nvblox_eigen nvblox_datasets pthread glog)
+target_compile_options(${PROJECT_NAME}_lib PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+target_link_libraries(${PROJECT_NAME}_lib nvblox::nvblox_lib nvblox::nvblox_eigen nvblox::nvblox_datasets pthread glog)
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp
   rclcpp_components
@@ -145,7 +130,7 @@ target_include_directories(${PROJECT_NAME}_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 target_include_directories(${PROJECT_NAME}_lib BEFORE PRIVATE
-  $<TARGET_PROPERTY:nvblox_eigen,INTERFACE_INCLUDE_DIRECTORIES>)
+  $<TARGET_PROPERTY:nvblox::nvblox_eigen,INTERFACE_INCLUDE_DIRECTORIES>)
 
 rclcpp_components_register_nodes(${PROJECT_NAME}_lib "nvblox::NvbloxNode")
 rclcpp_components_register_nodes(${PROJECT_NAME}_lib "nvblox::NvbloxHumanNode")
@@ -157,11 +142,6 @@ set_target_properties(${PROJECT_NAME}_lib PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
   BUILD_RPATH_USE_ORIGIN TRUE
   INSTALL_RPATH_USE_LINK_PATH TRUE)
-
-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
-  get_target_property(CUDA_ARCHS nvblox_lib CUDA_ARCHITECTURES)
-  set_property(TARGET ${PROJECT_NAME}_lib APPEND PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCHS})
-endif()
 
 ############
 # BINARIES #
@@ -195,7 +175,7 @@ install(
 
 # Install the library target.
 install(
-  TARGETS ${PROJECT_NAME}_lib nvblox_lib nvblox_eigen nvblox_datasets nvblox_gpu_hash stdgpu
+  TARGETS ${PROJECT_NAME}_lib
   EXPORT ${PROJECT_NAME}Targets
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
@@ -255,10 +235,14 @@ if(BUILD_TESTING)
   endif()
 
   # Integrations tests
-  add_subdirectory(test/integration_tests)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/integration_tests")
+    add_subdirectory(test/integration_tests)
+  endif()
 
   # Unit Tests
-  add_subdirectory(test/unit_tests)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/unit_tests")
+    add_subdirectory(test/unit_tests)
+  endif()
 endif()
 
 ##########
