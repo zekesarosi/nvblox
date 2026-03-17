@@ -253,6 +253,27 @@ constexpr Param<bool>::Description kPrintQueueDropsToConsoleParamDesc{
   "print_queue_drops_to_console", false,
   "Whether to print message drops from queues to the console."};
 
+// ======= ESDF 3D GRID PUBLISHING =======
+constexpr Param<bool>::Description kPublishEsdf3DGridParamDesc{
+  "publish_esdf_3d_grid", false,
+  "Publish the full 3D ESDF grid on a topic at the ESDF update rate."};
+
+constexpr Param<float>::Description kEsdf3DRadiusXYParamDesc{
+  "esdf_3d_radius_xy", 200.0F,
+  "Horizontal radius in meters of the 3D ESDF grid centered on the vehicle."};
+
+constexpr Param<float>::Description kEsdf3DRadiusZAboveParamDesc{
+  "esdf_3d_radius_z_above", 40.0F,
+  "Vertical radius above the vehicle in meters for the 3D ESDF grid."};
+
+constexpr Param<float>::Description kEsdf3DRadiusZBelowParamDesc{
+  "esdf_3d_radius_z_below", 10.0F,
+  "Vertical radius below the vehicle in meters for the 3D ESDF grid."};
+
+constexpr Param<float>::Description kPublishEsdf3DGridRateHzParamDesc{
+  "publish_esdf_3d_grid_rate_hz", 5.0F,
+  "Rate at which the 3D ESDF grid is published. Can be lower than update_esdf_rate_hz."};
+
 // ======= OUTPUT PARAMS =======
 constexpr Param<float>::Description kEsdfAndGradientsUnobservedValueParamDesc{
   "esdf_and_gradients_unobserved_value", -1000.F,
@@ -368,6 +389,12 @@ public:
   Param<float> clear_map_outside_radius_rate_hz{kClearMapOutsideRadiusRateHzParamDesc};
   Param<float> esdf_and_gradients_unobserved_value{kEsdfAndGradientsUnobservedValueParamDesc};
   Param<float> map_clearing_radius_m{kMapClearingRadiusMParamDesc};
+
+  Param<bool> publish_esdf_3d_grid{kPublishEsdf3DGridParamDesc};
+  Param<float> esdf_3d_radius_xy{kEsdf3DRadiusXYParamDesc};
+  Param<float> esdf_3d_radius_z_above{kEsdf3DRadiusZAboveParamDesc};
+  Param<float> esdf_3d_radius_z_below{kEsdf3DRadiusZBelowParamDesc};
+  Param<float> publish_esdf_3d_grid_rate_hz{kPublishEsdf3DGridRateHzParamDesc};
 };
 
 /// Container for all node params of the fuser node.

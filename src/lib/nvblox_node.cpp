@@ -371,6 +371,18 @@ void NvbloxNode::advertiseTopics()
   combined_occupancy_grid_publisher_ =
     create_publisher<nav_msgs::msg::OccupancyGrid>("~/combined_occupancy_grid", 1);
 
+  if (params_.publish_esdf_3d_grid) {
+    esdf_3d_grid_publisher_ = create_publisher<std_msgs::msg::Float32MultiArray>(
+      "~/esdf_3d_grid", rclcpp::QoS(1).transient_local());
+    RCLCPP_INFO(
+      get_logger(),
+      "ESDF 3D grid publisher enabled: topic=~/esdf_3d_grid "
+      "radius_xy=%.1fm z_above=%.1fm z_below=%.1fm",
+      static_cast<float>(params_.esdf_3d_radius_xy),
+      static_cast<float>(params_.esdf_3d_radius_z_above),
+      static_cast<float>(params_.esdf_3d_radius_z_below));
+  }
+
   // Debug outputs
   esdf_slice_bounds_publisher_ =
     create_publisher<visualization_msgs::msg::Marker>("~/esdf_slice_bounds", 1);
@@ -630,6 +642,16 @@ void NvbloxNode::tick()
     update_esdf_last_time_ = now;
   }
 
+  // 3D ESDF grid publish (decoupled from ESDF compute to allow independent rates)
+  if (params_.esdf_mode == EsdfMode::k3D && params_.publish_esdf_3d_grid) {
+    if (const rclcpp::Time now = this->get_clock()->now();
+      shouldProcess(now, publish_esdf_3d_grid_last_time_, params_.publish_esdf_3d_grid_rate_hz))
+    {
+      publishEsdf3DGrid();
+      publish_esdf_3d_grid_last_time_ = now;
+    }
+  }
+
   // Visualization
   if (const rclcpp::Time now = this->get_clock()->now();
     shouldProcess(now, publish_layer_last_time_, params_.publish_layer_rate_hz))
@@ -807,6 +829,86 @@ void NvbloxNode::processEsdf()
         params_.distance_map_unknown_value_pessimistic);
     }
   }
+}
+
+void NvbloxNode::publishEsdf3DGrid()
+{
+  if (!esdf_3d_grid_publisher_ ||
+      esdf_3d_grid_publisher_->get_subscription_count() == 0) {
+    return;
+  }
+
+  timing::Timer timer("ros/esdf/3d_grid_publish");
+
+  Transform T_L_C;
+  if (!transformer_.lookupTransformToGlobalFrame(
+        params_.map_clearing_frame_id, rclcpp::Time(0), &T_L_C)) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "ESDF 3D grid: TF lookup failed for frame '%s', skipping publish",
+      params_.map_clearing_frame_id.get().c_str());
+    return;
+  }
+
+  const Vector3f vehicle_pos = T_L_C.translation();
+  const float radius_xy = params_.esdf_3d_radius_xy;
+  const float z_above = params_.esdf_3d_radius_z_above;
+  const float z_below = params_.esdf_3d_radius_z_below;
+
+  auto request = std::make_shared<nvblox_msgs::srv::EsdfAndGradients::Request>();
+  request->use_aabb = true;
+  request->update_esdf = false;
+  request->frame_id = params_.global_frame.get();
+  request->aabb_min_m.x = vehicle_pos.x() - radius_xy;
+  request->aabb_min_m.y = vehicle_pos.y() - radius_xy;
+  request->aabb_min_m.z = vehicle_pos.z() - z_below;
+  request->aabb_size_m.x = radius_xy * 2.0f;
+  request->aabb_size_m.y = radius_xy * 2.0f;
+  request->aabb_size_m.z = z_below + z_above;
+
+  auto response = std::make_shared<nvblox_msgs::srv::EsdfAndGradients::Response>();
+  esdf_and_gradients_converter_.getEsdfAndGradientResponse(
+    static_mapper_->esdf_layer(),
+    params_.esdf_and_gradients_unobserved_value,
+    request, response, *cuda_stream_);
+
+  if (!response->success) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "ESDF 3D grid: conversion failed at vehicle=[%.1f,%.1f,%.1f]",
+      vehicle_pos.x(), vehicle_pos.y(), vehicle_pos.z());
+    return;
+  }
+
+  const auto & layout = response->esdf_and_gradients.layout;
+  size_t nx = layout.dim.size() >= 1 ? layout.dim[0].size : 0;
+  size_t ny = layout.dim.size() >= 2 ? layout.dim[1].size : 0;
+  size_t nz = layout.dim.size() >= 3 ? layout.dim[2].size : 0;
+
+  std_msgs::msg::Float32MultiArray msg;
+  msg.layout = layout;
+  msg.layout.data_offset = 4;
+
+  const auto & grid_data = response->esdf_and_gradients.data;
+  msg.data.reserve(4 + grid_data.size());
+  msg.data.push_back(response->voxel_size_m);
+  msg.data.push_back(static_cast<float>(response->origin_m.x));
+  msg.data.push_back(static_cast<float>(response->origin_m.y));
+  msg.data.push_back(static_cast<float>(response->origin_m.z));
+  msg.data.insert(msg.data.end(), grid_data.begin(), grid_data.end());
+
+  esdf_3d_grid_publisher_->publish(msg);
+
+  RCLCPP_INFO_THROTTLE(
+    get_logger(), *get_clock(), 10000,
+    "ESDF 3D grid published: %zux%zux%zu voxel=%.2fm "
+    "vehicle=[%.1f,%.1f,%.1f] origin=[%.1f,%.1f,%.1f] "
+    "data=%zu bytes subs=%zu",
+    nx, ny, nz, response->voxel_size_m,
+    vehicle_pos.x(), vehicle_pos.y(), vehicle_pos.z(),
+    response->origin_m.x, response->origin_m.y, response->origin_m.z,
+    msg.data.size() * sizeof(float),
+    esdf_3d_grid_publisher_->get_subscription_count());
 }
 
 void NvbloxNode::sliceAndPublishEsdf(

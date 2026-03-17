@@ -45,6 +45,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
@@ -189,6 +190,7 @@ protected:
   virtual void processPointcloudQueue();
   virtual void processServiceRequestTaskQueue();
   virtual void processEsdf();
+  void publishEsdf3DGrid();
 
   // Return true if the time between the two passed timestamps is sufficient to trigger an action
   // under the requested rate.
@@ -380,6 +382,8 @@ protected:
 
   // Publishers
   std::unique_ptr<LayerPublisher> layer_publisher_;
+  rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr
+    esdf_3d_grid_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
     static_esdf_pointcloud_publisher_;
   rclcpp::Publisher<nvblox_msgs::msg::DistanceMapSlice>::SharedPtr
@@ -445,6 +449,7 @@ protected:
   rclcpp::Time integrate_lidar_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time update_mesh_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time update_esdf_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+  rclcpp::Time publish_esdf_3d_grid_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time publish_layer_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time publish_debug_vis_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time decay_tsdf_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
