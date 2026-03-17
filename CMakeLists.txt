@@ -189,12 +189,6 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install tests
-install(DIRECTORY
-  test
-  DESTINATION share/${PROJECT_NAME}
-)
-
 install(DIRECTORY
   scripts
   DESTINATION share/${PROJECT_NAME}/scripts/
