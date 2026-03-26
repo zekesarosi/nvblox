@@ -58,6 +58,7 @@
 #include "nvblox_ros/conversions/pointcloud_conversions.hpp"
 #include "nvblox_ros/conversions/esdf_slice_conversions.hpp"
 #include "nvblox_ros/conversions/esdf_and_gradients_conversions.hpp"
+#include "nvblox_ros/conversions/occupancy_grid_3d_conversions.hpp"
 #include "nvblox_ros/mapper_initialization.hpp"
 #include "nvblox_ros/transformer.hpp"
 #include "nvblox_ros/camera_cache.hpp"
@@ -191,6 +192,7 @@ protected:
   virtual void processServiceRequestTaskQueue();
   virtual void processEsdf();
   void publishEsdf3DGrid();
+  void publishOccupancy3DGrid();
 
   // Return true if the time between the two passed timestamps is sufficient to trigger an action
   // under the requested rate.
@@ -384,6 +386,10 @@ protected:
   std::unique_ptr<LayerPublisher> layer_publisher_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr
     esdf_3d_grid_publisher_;
+  rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr
+    occupancy_3d_grid_publisher_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+    occupancy_3d_viz_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
     static_esdf_pointcloud_publisher_;
   rclcpp::Publisher<nvblox_msgs::msg::DistanceMapSlice>::SharedPtr
@@ -450,6 +456,7 @@ protected:
   rclcpp::Time update_mesh_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time update_esdf_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time publish_esdf_3d_grid_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+  rclcpp::Time publish_occupancy_3d_grid_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time publish_layer_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time publish_debug_vis_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time decay_tsdf_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
@@ -480,6 +487,7 @@ protected:
   conversions::PointcloudConverter pointcloud_converter_;
   conversions::EsdfSliceConverter esdf_slice_converter_;
   conversions::EsdfAndGradientsConverter esdf_and_gradients_converter_;
+  conversions::OccupancyGrid3DConverter occupancy_grid_3d_converter_;
 
   // Caches for GPU images
   ColorImage color_image_{MemoryType::kDevice};

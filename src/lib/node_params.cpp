@@ -167,6 +167,14 @@ void initializeNvbloxNodeParams(
   initParam<float>(node, &params->esdf_3d_radius_z_above, parameter_tree);
   initParam<float>(node, &params->esdf_3d_radius_z_below, parameter_tree);
   initParam<float>(node, &params->publish_esdf_3d_grid_rate_hz, parameter_tree);
+
+  initParam<bool>(node, &params->publish_occupancy_3d_grid, parameter_tree);
+  initParam<float>(node, &params->occupancy_3d_radius_xy, parameter_tree);
+  initParam<float>(node, &params->occupancy_3d_radius_z_above, parameter_tree);
+  initParam<float>(node, &params->occupancy_3d_radius_z_below, parameter_tree);
+  initParam<float>(node, &params->publish_occupancy_3d_grid_rate_hz, parameter_tree);
+  initParam<float>(node, &params->occupancy_3d_unobserved_value, parameter_tree);
+  initParam<bool>(node, &params->publish_occupancy_3d_viz, parameter_tree);
 }
 
 void initializeFuserNodeParams(

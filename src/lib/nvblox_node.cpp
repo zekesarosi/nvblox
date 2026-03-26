@@ -383,6 +383,24 @@ void NvbloxNode::advertiseTopics()
       static_cast<float>(params_.esdf_3d_radius_z_below));
   }
 
+  if (params_.publish_occupancy_3d_grid) {
+    occupancy_3d_grid_publisher_ = create_publisher<std_msgs::msg::Float32MultiArray>(
+      "~/occupancy_3d_grid", rclcpp::QoS(1).transient_local());
+    if (params_.publish_occupancy_3d_viz) {
+      occupancy_3d_viz_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "~/occupancy_3d_viz", rclcpp::QoS(1));
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "Occupancy 3D grid publisher enabled: topic=~/occupancy_3d_grid "
+      "radius_xy=%.1fm z_above=%.1fm z_below=%.1fm rate=%.1fHz viz=%s",
+      static_cast<float>(params_.occupancy_3d_radius_xy),
+      static_cast<float>(params_.occupancy_3d_radius_z_above),
+      static_cast<float>(params_.occupancy_3d_radius_z_below),
+      static_cast<float>(params_.publish_occupancy_3d_grid_rate_hz),
+      params_.publish_occupancy_3d_viz ? "on" : "off");
+  }
+
   // Debug outputs
   esdf_slice_bounds_publisher_ =
     create_publisher<visualization_msgs::msg::Marker>("~/esdf_slice_bounds", 1);
@@ -652,6 +670,18 @@ void NvbloxNode::tick()
     }
   }
 
+  // 3D occupancy grid publish (direct log-odds from occupancy layer)
+  if (params_.publish_occupancy_3d_grid && isStaticOccupancy(params_.mapping_type)) {
+    if (const rclcpp::Time now = this->get_clock()->now();
+      shouldProcess(
+        now, publish_occupancy_3d_grid_last_time_,
+        params_.publish_occupancy_3d_grid_rate_hz))
+    {
+      publishOccupancy3DGrid();
+      publish_occupancy_3d_grid_last_time_ = now;
+    }
+  }
+
   // Visualization
   if (const rclcpp::Time now = this->get_clock()->now();
     shouldProcess(now, publish_layer_last_time_, params_.publish_layer_rate_hz))
@@ -885,30 +915,287 @@ void NvbloxNode::publishEsdf3DGrid()
   size_t ny = layout.dim.size() >= 2 ? layout.dim[1].size : 0;
   size_t nz = layout.dim.size() >= 3 ? layout.dim[2].size : 0;
 
+  const auto & grid_data = response->esdf_and_gradients.data;
+  const size_t num_voxels = nx * ny * nz;
+
+  const bool include_obs_state =
+    params_.publish_observation_state &&
+    isStaticOccupancy(params_.mapping_type) &&
+    num_voxels > 0;
+
+  const int values_per_voxel = include_obs_state ? 2 : 1;
+
   std_msgs::msg::Float32MultiArray msg;
   msg.layout = layout;
   msg.layout.data_offset = 4;
 
-  const auto & grid_data = response->esdf_and_gradients.data;
-  msg.data.reserve(4 + grid_data.size());
+  msg.data.reserve(4 + num_voxels * values_per_voxel);
   msg.data.push_back(response->voxel_size_m);
   msg.data.push_back(static_cast<float>(response->origin_m.x));
   msg.data.push_back(static_cast<float>(response->origin_m.y));
   msg.data.push_back(static_cast<float>(response->origin_m.z));
-  msg.data.insert(msg.data.end(), grid_data.begin(), grid_data.end());
+
+  if (!include_obs_state) {
+    msg.data.insert(msg.data.end(), grid_data.begin(), grid_data.end());
+  } else {
+    const float free_threshold =
+      params_.observation_free_threshold_log_odds;
+    const float voxel_sz = response->voxel_size_m;
+    const Vector3f origin_v(
+      static_cast<float>(response->origin_m.x),
+      static_cast<float>(response->origin_m.y),
+      static_cast<float>(response->origin_m.z));
+
+    const auto & occ_layer = static_mapper_->occupancy_layer();
+
+    for (size_t ix = 0; ix < nx; ++ix) {
+      for (size_t iy = 0; iy < ny; ++iy) {
+        for (size_t iz = 0; iz < nz; ++iz) {
+          const size_t linear = ix * ny * nz + iy * nz + iz;
+          msg.data.push_back(grid_data[linear]);
+
+          float obs_state = 0.0f;
+          const Vector3f pos(
+            origin_v.x() + (static_cast<float>(ix) + 0.5f) * voxel_sz,
+            origin_v.y() + (static_cast<float>(iy) + 0.5f) * voxel_sz,
+            origin_v.z() + (static_cast<float>(iz) + 0.5f) * voxel_sz);
+
+          const float esdf_dist = grid_data[linear];
+          const float unobs_val = params_.esdf_and_gradients_unobserved_value;
+          const bool esdf_observed =
+            (esdf_dist > unobs_val + 1.0f) && std::isfinite(esdf_dist);
+
+          if (esdf_observed) {
+            obs_state = (esdf_dist < 0.0f) ? 2.0f : 1.0f;
+          } else {
+            const Index3D block_idx =
+              getBlockIndexFromPositionInLayer(occ_layer.block_size(), pos);
+            if (occ_layer.isBlockAllocated(block_idx)) {
+              obs_state = 1.0f;
+            }
+          }
+          msg.data.push_back(obs_state);
+        }
+      }
+    }
+  }
 
   esdf_3d_grid_publisher_->publish(msg);
 
   RCLCPP_INFO_THROTTLE(
     get_logger(), *get_clock(), 10000,
-    "ESDF 3D grid published: %zux%zux%zu voxel=%.2fm "
+    "ESDF 3D grid published: %zux%zux%zu voxel=%.2fm vpv=%d "
     "vehicle=[%.1f,%.1f,%.1f] origin=[%.1f,%.1f,%.1f] "
     "data=%zu bytes subs=%zu",
-    nx, ny, nz, response->voxel_size_m,
+    nx, ny, nz, response->voxel_size_m, values_per_voxel,
     vehicle_pos.x(), vehicle_pos.y(), vehicle_pos.z(),
     response->origin_m.x, response->origin_m.y, response->origin_m.z,
     msg.data.size() * sizeof(float),
     esdf_3d_grid_publisher_->get_subscription_count());
+}
+
+void NvbloxNode::publishOccupancy3DGrid()
+{
+  const bool has_grid_subs =
+    occupancy_3d_grid_publisher_ &&
+    occupancy_3d_grid_publisher_->get_subscription_count() > 0;
+  const bool has_viz_subs =
+    occupancy_3d_viz_publisher_ &&
+    occupancy_3d_viz_publisher_->get_subscription_count() > 0;
+
+  if (!has_grid_subs && !has_viz_subs) {
+    return;
+  }
+
+  if (!static_mapper_) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Occupancy 3D grid: static_mapper not initialized");
+    return;
+  }
+
+  timing::Timer occ_timer("ros/occupancy_3d_grid");
+
+  // Get vehicle position for centering the extraction AABB
+  Transform T_L_B;
+  if (!transformer_.lookupTransformToGlobalFrame(
+        params_.pose_frame, rclcpp::Time(0), &T_L_B)) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Occupancy 3D grid: no transform available for pose_frame=%s",
+      static_cast<std::string>(params_.pose_frame).c_str());
+    return;
+  }
+  const Vector3f vehicle_pos = T_L_B.translation();
+
+  const float radius_xy = params_.occupancy_3d_radius_xy;
+  const float radius_z_above = params_.occupancy_3d_radius_z_above;
+  const float radius_z_below = params_.occupancy_3d_radius_z_below;
+  const float unobs_val = params_.occupancy_3d_unobserved_value;
+
+  const Vector3f aabb_min(
+    vehicle_pos.x() - radius_xy,
+    vehicle_pos.y() - radius_xy,
+    vehicle_pos.z() - radius_z_below);
+  const Vector3f aabb_max(
+    vehicle_pos.x() + radius_xy,
+    vehicle_pos.y() + radius_xy,
+    vehicle_pos.z() + radius_z_above);
+  const AxisAlignedBoundingBox aabb(aabb_min, aabb_max);
+
+  const auto & occ_layer = static_mapper_->occupancy_layer();
+
+  auto msg = occupancy_grid_3d_converter_.occupancyInAabbToMultiArrayMsg(
+    occ_layer, aabb, unobs_val, *cuda_stream_);
+
+  const auto & layout = msg.layout;
+  const size_t nx = layout.dim.size() >= 1 ? layout.dim[0].size : 0;
+  const size_t ny = layout.dim.size() >= 2 ? layout.dim[1].size : 0;
+  const size_t nz = layout.dim.size() >= 3 ? layout.dim[2].size : 0;
+
+  // Extract origin from header floats
+  float origin_x = 0.0f, origin_y = 0.0f, origin_z = 0.0f;
+  if (msg.data.size() >= 4) {
+    origin_x = msg.data[1];
+    origin_y = msg.data[2];
+    origin_z = msg.data[3];
+  }
+
+  if (has_grid_subs) {
+    occupancy_3d_grid_publisher_->publish(msg);
+  }
+
+  const auto & stats = occupancy_grid_3d_converter_.lastStats();
+
+  RCLCPP_INFO_THROTTLE(
+    get_logger(), *get_clock(), 5000,
+    "Occupancy 3D grid: %zux%zux%zu voxel=%.2fm "
+    "vehicle=[%.1f,%.1f,%.1f] origin=[%.1f,%.1f,%.1f] "
+    "observed=%zu/%zu (%.1f%%) occupied=%zu free=%zu unobserved=%zu "
+    "log_odds=[%.2f,%.2f] subs=%zu",
+    nx, ny, nz, occ_layer.voxel_size(),
+    vehicle_pos.x(), vehicle_pos.y(), vehicle_pos.z(),
+    origin_x, origin_y, origin_z,
+    stats.observed_voxels, stats.total_voxels,
+    stats.total_voxels > 0 ?
+      100.0 * stats.observed_voxels / stats.total_voxels : 0.0,
+    stats.occupied_voxels, stats.free_voxels, stats.unobserved_voxels,
+    stats.min_log_odds, stats.max_log_odds,
+    has_grid_subs ? occupancy_3d_grid_publisher_->get_subscription_count() : 0);
+
+  // Publish PointCloud2 visualization if enabled and subscribed
+  if (has_viz_subs && msg.data.size() > 4) {
+    timing::Timer viz_timer("ros/occupancy_3d_grid/viz");
+
+    const float voxel_size = msg.data[0];
+    constexpr size_t header_offset = 4;
+    constexpr int viz_downsample = 2;
+
+    // Count points for pre-allocation (only observed voxels, downsampled)
+    size_t point_count = 0;
+    const bool unobs_is_nan = std::isnan(unobs_val);
+    for (size_t ix = 0; ix < nx; ix += viz_downsample) {
+      for (size_t iy = 0; iy < ny; iy += viz_downsample) {
+        for (size_t iz = 0; iz < nz; iz += viz_downsample) {
+          const size_t linear = ix * ny * nz + iy * nz + iz;
+          if ((linear + header_offset) >= msg.data.size()) continue;
+          const float val = msg.data[linear + header_offset];
+          const bool is_unobs = unobs_is_nan ? std::isnan(val) :
+                                (val == unobs_val);
+          if (!is_unobs) {
+            point_count++;
+          }
+        }
+      }
+    }
+
+    sensor_msgs::msg::PointCloud2 pcl_msg;
+    pcl_msg.header.frame_id = static_cast<std::string>(params_.global_frame);
+    pcl_msg.header.stamp = this->get_clock()->now();
+    pcl_msg.height = 1;
+    pcl_msg.width = point_count;
+    pcl_msg.is_dense = true;
+    pcl_msg.is_bigendian = false;
+
+    // Fields: x, y, z, intensity (log_odds), rgba
+    sensor_msgs::msg::PointField field;
+    field.datatype = sensor_msgs::msg::PointField::FLOAT32;
+    field.count = 1;
+
+    field.name = "x"; field.offset = 0;
+    pcl_msg.fields.push_back(field);
+    field.name = "y"; field.offset = 4;
+    pcl_msg.fields.push_back(field);
+    field.name = "z"; field.offset = 8;
+    pcl_msg.fields.push_back(field);
+    field.name = "intensity"; field.offset = 12;
+    pcl_msg.fields.push_back(field);
+
+    sensor_msgs::msg::PointField rgba_field;
+    rgba_field.name = "rgba";
+    rgba_field.offset = 16;
+    rgba_field.datatype = sensor_msgs::msg::PointField::UINT32;
+    rgba_field.count = 1;
+    pcl_msg.fields.push_back(rgba_field);
+
+    pcl_msg.point_step = 20;
+    pcl_msg.row_step = pcl_msg.point_step * point_count;
+    pcl_msg.data.resize(pcl_msg.row_step);
+
+    size_t pt_idx = 0;
+    for (size_t ix = 0; ix < nx; ix += viz_downsample) {
+      for (size_t iy = 0; iy < ny; iy += viz_downsample) {
+        for (size_t iz = 0; iz < nz; iz += viz_downsample) {
+          const size_t linear = ix * ny * nz + iy * nz + iz;
+          if ((linear + header_offset) >= msg.data.size()) continue;
+          const float val = msg.data[linear + header_offset];
+          const bool is_unobs = unobs_is_nan ? std::isnan(val) :
+                                (val == unobs_val);
+          if (is_unobs) continue;
+
+          const float px = origin_x + (static_cast<float>(ix) + 0.5f) * voxel_size;
+          const float py = origin_y + (static_cast<float>(iy) + 0.5f) * voxel_size;
+          const float pz = origin_z + (static_cast<float>(iz) + 0.5f) * voxel_size;
+
+          // Color: occupied (log_odds > 0) = red, free (log_odds <= 0) = green
+          // Alpha encodes confidence: brighter = higher |log_odds|
+          const float abs_lo = std::min(std::abs(val), 5.0f);
+          const uint8_t alpha = static_cast<uint8_t>(
+            50 + static_cast<int>(205.0f * abs_lo / 5.0f));
+          uint32_t rgba;
+          if (val > 0.0f) {
+            rgba = (static_cast<uint32_t>(alpha) << 24) |
+                   (static_cast<uint32_t>(200) << 16) |
+                   (static_cast<uint32_t>(40) << 8) |
+                   static_cast<uint32_t>(40);
+          } else {
+            rgba = (static_cast<uint32_t>(alpha) << 24) |
+                   (static_cast<uint32_t>(40) << 16) |
+                   (static_cast<uint32_t>(200) << 8) |
+                   static_cast<uint32_t>(40);
+          }
+
+          const size_t offset = pt_idx * pcl_msg.point_step;
+          std::memcpy(&pcl_msg.data[offset + 0], &px, 4);
+          std::memcpy(&pcl_msg.data[offset + 4], &py, 4);
+          std::memcpy(&pcl_msg.data[offset + 8], &pz, 4);
+          std::memcpy(&pcl_msg.data[offset + 12], &val, 4);
+          std::memcpy(&pcl_msg.data[offset + 16], &rgba, 4);
+          pt_idx++;
+        }
+      }
+    }
+
+    pcl_msg.width = pt_idx;
+    pcl_msg.row_step = pcl_msg.point_step * pt_idx;
+    pcl_msg.data.resize(pcl_msg.row_step);
+
+    occupancy_3d_viz_publisher_->publish(pcl_msg);
+
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "Occupancy 3D viz: %zu points published", pt_idx);
+  }
 }
 
 void NvbloxNode::sliceAndPublishEsdf(

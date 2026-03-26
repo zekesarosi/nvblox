@@ -15,12 +15,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 #include "nvblox_ros/conversions/esdf_and_gradients_conversions.hpp"
+#include "nvblox_ros/conversions/occupancy_grid_3d_conversions.hpp"
 
 #include <nvblox/core/types.h>
 #include <nvblox/map/unified_3d_grid.h>
 #include <nvblox/map/voxels.h>
 #include <nvblox/map/internal/cuda/impl/layer_to_3d_grid_impl.cuh>
 #include <nvblox/map/internal/cuda/layer_to_3d_grid.cuh>
+
+#include <cmath>
+#include <algorithm>
+#include <limits>
 
 namespace nvblox {
 namespace conversions {
@@ -177,6 +182,106 @@ std::vector<BoundingShape> getShapesToClear(
                        "clearing the spheres.");
   }
   return shapes_to_clear;
+}
+
+// ============================================================
+// OccupancyGrid3DConverter — shares this TU to avoid duplicate
+// symbols from layer_to_3d_grid_impl.cuh
+// ============================================================
+
+struct LogOddsFunctor {
+  __device__ __inline__ float operator()(const OccupancyVoxel& voxel) const {
+    return voxel.log_odds;
+  }
+};
+
+std_msgs::msg::Float32MultiArray
+OccupancyGrid3DConverter::occupancyInAabbToMultiArrayMsg(
+    const OccupancyLayer& occ_layer,
+    const AxisAlignedBoundingBox& aabb,
+    const float unobserved_value,
+    const CudaStream& cuda_stream) {
+
+  LogOddsFunctor conversion_op;
+  voxelLayerToDenseVoxelGridInAABBAsync(
+    occ_layer, aabb, unobserved_value,
+    conversion_op, &gpu_grid_, cuda_stream);
+
+  cpu_grid_.copyFromAsync(gpu_grid_, cuda_stream);
+
+  const Index3D size_in_voxels = gpu_grid_.aabb_size();
+
+  std_msgs::msg::Float32MultiArray array_msg;
+  array_msg.layout.dim.resize(3);
+  array_msg.layout.dim[0].label = "x";
+  array_msg.layout.dim[0].size = size_in_voxels.x();
+  array_msg.layout.dim[0].stride =
+      size_in_voxels.x() * size_in_voxels.y() * size_in_voxels.z();
+  array_msg.layout.dim[1].label = "y";
+  array_msg.layout.dim[1].size = size_in_voxels.y();
+  array_msg.layout.dim[1].stride = size_in_voxels.y() * size_in_voxels.z();
+  array_msg.layout.dim[2].label = "z";
+  array_msg.layout.dim[2].size = size_in_voxels.z();
+  array_msg.layout.dim[2].stride = size_in_voxels.z();
+  array_msg.layout.data_offset = 4;
+
+  array_msg.data = cpu_grid_.data().toVectorAsync(cuda_stream);
+  cuda_stream.synchronize();
+
+  const size_t num_voxels = static_cast<size_t>(size_in_voxels.x()) *
+                            static_cast<size_t>(size_in_voxels.y()) *
+                            static_cast<size_t>(size_in_voxels.z());
+
+  const Vector3f origin_m =
+    cpu_grid_.min_index().cast<float>() * occ_layer.voxel_size();
+  array_msg.data.insert(array_msg.data.begin(), {
+    occ_layer.voxel_size(),
+    origin_m.x(),
+    origin_m.y(),
+    origin_m.z()
+  });
+
+  computeStats(array_msg.data, num_voxels, unobserved_value);
+
+  return array_msg;
+}
+
+void OccupancyGrid3DConverter::computeStats(
+    const std::vector<float>& data, size_t num_voxels,
+    float unobserved_value) {
+
+  last_stats_ = OccupancyGrid3DStats{};
+  last_stats_.total_voxels = num_voxels;
+  last_stats_.min_log_odds = std::numeric_limits<float>::max();
+  last_stats_.max_log_odds = std::numeric_limits<float>::lowest();
+
+  constexpr size_t header_offset = 4;
+  const bool unobs_is_nan = std::isnan(unobserved_value);
+
+  for (size_t i = 0; i < num_voxels && (i + header_offset) < data.size(); ++i) {
+    const float val = data[i + header_offset];
+
+    const bool is_unobs = unobs_is_nan ? std::isnan(val) :
+                          (val == unobserved_value);
+
+    if (is_unobs) {
+      last_stats_.unobserved_voxels++;
+    } else {
+      last_stats_.observed_voxels++;
+      if (val > 0.0f) {
+        last_stats_.occupied_voxels++;
+      } else {
+        last_stats_.free_voxels++;
+      }
+      last_stats_.min_log_odds = std::min(last_stats_.min_log_odds, val);
+      last_stats_.max_log_odds = std::max(last_stats_.max_log_odds, val);
+    }
+  }
+
+  if (last_stats_.observed_voxels == 0) {
+    last_stats_.min_log_odds = 0.0f;
+    last_stats_.max_log_odds = 0.0f;
+  }
 }
 
 }  // namespace conversions

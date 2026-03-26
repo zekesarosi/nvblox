@@ -22,6 +22,8 @@
 #include "nvblox/mapper/multi_mapper.h"
 #include "nvblox_ros/dataset_types.hpp"
 
+#include <limits>
+
 #include <rclcpp/rclcpp.hpp>
 
 namespace nvblox
@@ -274,6 +276,50 @@ constexpr Param<float>::Description kPublishEsdf3DGridRateHzParamDesc{
   "publish_esdf_3d_grid_rate_hz", 5.0F,
   "Rate at which the 3D ESDF grid is published. Can be lower than update_esdf_rate_hz."};
 
+constexpr Param<bool>::Description kPublishObservationStateParamDesc{
+  "publish_observation_state", false,
+  "When true, the 3D ESDF grid topic includes a second float per voxel encoding "
+  "observation state from the occupancy layer (0=unobserved, 1=observed free, "
+  "2=observed occupied). Only applies to occupancy-based mapping types."};
+
+constexpr Param<float>::Description kObservationFreeThresholdLogOddsParamDesc{
+  "observation_free_threshold_log_odds", 0.0F,
+  "Log-odds threshold below which an occupancy voxel is classified as observed-free. "
+  "Default 0.0 corresponds to probability 0.5."};
+
+// ======= OCCUPANCY 3D GRID PUBLISHING =======
+constexpr Param<bool>::Description kPublishOccupancy3DGridParamDesc{
+  "publish_occupancy_3d_grid", false,
+  "Publish the raw occupancy log-odds as a dense 3D grid on a topic. "
+  "Only applies to occupancy-based mapping types (static_occupancy, "
+  "human_with_static_occupancy)."};
+
+constexpr Param<float>::Description kOccupancy3DRadiusXYParamDesc{
+  "occupancy_3d_radius_xy", 200.0F,
+  "Horizontal radius in meters of the 3D occupancy grid centered on the vehicle."};
+
+constexpr Param<float>::Description kOccupancy3DRadiusZAboveParamDesc{
+  "occupancy_3d_radius_z_above", 40.0F,
+  "Vertical radius above the vehicle in meters for the 3D occupancy grid."};
+
+constexpr Param<float>::Description kOccupancy3DRadiusZBelowParamDesc{
+  "occupancy_3d_radius_z_below", 10.0F,
+  "Vertical radius below the vehicle in meters for the 3D occupancy grid."};
+
+constexpr Param<float>::Description kPublishOccupancy3DGridRateHzParamDesc{
+  "publish_occupancy_3d_grid_rate_hz", 5.0F,
+  "Rate at which the 3D occupancy grid is published."};
+
+constexpr Param<float>::Description kOccupancy3DUnobservedValueParamDesc{
+  "occupancy_3d_unobserved_value", std::numeric_limits<float>::quiet_NaN(),
+  "Value used for unobserved voxels in the dense occupancy grid output. "
+  "Default NaN provides a clean signal distinguishable from any log-odds value."};
+
+constexpr Param<bool>::Description kPublishOccupancy3DVizParamDesc{
+  "publish_occupancy_3d_viz", false,
+  "Publish a PointCloud2 visualization of the occupancy 3D grid for debugging. "
+  "Color encodes observation state: green=free, red=occupied, grey=unobserved."};
+
 // ======= OUTPUT PARAMS =======
 constexpr Param<float>::Description kEsdfAndGradientsUnobservedValueParamDesc{
   "esdf_and_gradients_unobserved_value", -1000.F,
@@ -395,6 +441,16 @@ public:
   Param<float> esdf_3d_radius_z_above{kEsdf3DRadiusZAboveParamDesc};
   Param<float> esdf_3d_radius_z_below{kEsdf3DRadiusZBelowParamDesc};
   Param<float> publish_esdf_3d_grid_rate_hz{kPublishEsdf3DGridRateHzParamDesc};
+  Param<bool> publish_observation_state{kPublishObservationStateParamDesc};
+  Param<float> observation_free_threshold_log_odds{kObservationFreeThresholdLogOddsParamDesc};
+
+  Param<bool> publish_occupancy_3d_grid{kPublishOccupancy3DGridParamDesc};
+  Param<float> occupancy_3d_radius_xy{kOccupancy3DRadiusXYParamDesc};
+  Param<float> occupancy_3d_radius_z_above{kOccupancy3DRadiusZAboveParamDesc};
+  Param<float> occupancy_3d_radius_z_below{kOccupancy3DRadiusZBelowParamDesc};
+  Param<float> publish_occupancy_3d_grid_rate_hz{kPublishOccupancy3DGridRateHzParamDesc};
+  Param<float> occupancy_3d_unobserved_value{kOccupancy3DUnobservedValueParamDesc};
+  Param<bool> publish_occupancy_3d_viz{kPublishOccupancy3DVizParamDesc};
 };
 
 /// Container for all node params of the fuser node.
