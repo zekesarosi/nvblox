@@ -95,6 +95,7 @@ private:
   std::shared_ptr<CudaStream> cuda_stream_;
 
   // Buffers
+  std::vector<Vector3f> pointcloud_staging_;  // cached CPU staging buffer
   host_vector<Vector3f> lidar_pointcloud_host_;
   device_vector<Vector3f> lidar_pointcloud_device_;
   device_vector<PclPointXYZI> pcl_pointcloud_device_;

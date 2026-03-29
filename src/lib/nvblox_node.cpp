@@ -613,7 +613,12 @@ void NvbloxNode::tick()
   if (const rclcpp::Time now = this->get_clock()->now();
     shouldProcess(now, decay_tsdf_last_time_, params_.decay_tsdf_rate_hz))
   {
-    decayTsdf();
+    if (isStaticOccupancy(params_.mapping_type)) {
+      timing::Timer timer("ros/decay_static_occupancy");
+      static_mapper_->decayOccupancy();
+    } else {
+      decayTsdf();
+    }
     decay_tsdf_last_time_ = now;
   }
   if (const rclcpp::Time now = this->get_clock()->now();

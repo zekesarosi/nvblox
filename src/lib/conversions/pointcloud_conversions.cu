@@ -178,14 +178,24 @@ void PointcloudConverter::depthImageFromPointcloudGPU(
     cuda_stream_->synchronize();
   }
 
-  // Copy the pointcloud into pinned host memory
-  lidar_pointcloud_host_.clearNoDeallocate();
+  // Stage in cached CPU memory first to avoid individual writes to pinned
+  // (uncached) host memory. On Jetson ARM, each 12-byte push_back to pinned
+  // memory costs ~3μs, totaling ~440ms for 131k points. By staging in a
+  // regular std::vector we get cached writes, then do a single bulk H2D copy.
+  pointcloud_staging_.clear();
+  pointcloud_staging_.reserve(num_points);
   for (; iter_xyz != iter_xyz.end(); ++iter_xyz) {
-    lidar_pointcloud_host_.push_back(
-        Vector3f(iter_xyz[0], iter_xyz[1], iter_xyz[2]));
+    pointcloud_staging_.emplace_back(iter_xyz[0], iter_xyz[1], iter_xyz[2]);
   }
-  // Copy the pointcloud to the GPU
-  lidar_pointcloud_device_.copyFromAsync(lidar_pointcloud_host_, *cuda_stream_);
+
+  // Copy directly from pageable staging buffer to GPU (CUDA internally pins
+  // in page-sized chunks for the DMA transfer).
+  lidar_pointcloud_device_.resizeAsync(pointcloud_staging_.size(), *cuda_stream_);
+  cuda_stream_->synchronize();
+  checkCudaErrors(cudaMemcpy(lidar_pointcloud_device_.data(),
+                             pointcloud_staging_.data(),
+                             pointcloud_staging_.size() * sizeof(Vector3f),
+                             cudaMemcpyHostToDevice));
 
   // Convert to an image on the GPU
   constexpr int num_threads_per_block = 256;  // because why not
