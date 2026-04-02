@@ -274,6 +274,19 @@ constexpr Param<float>::Description kPublishEsdf3DGridRateHzParamDesc{
   "publish_esdf_3d_grid_rate_hz", 5.0F,
   "Rate at which the 3D ESDF grid is published. Can be lower than update_esdf_rate_hz."};
 
+constexpr Param<bool>::Description kPublishObservationStateParamDesc{
+  "publish_observation_state", false,
+  "When true, the 3D ESDF grid includes occupancy-layer observation state "
+  "(2 floats per voxel: [distance, obs_state]). obs_state: 0=unobserved, "
+  "1=observed_free, 2=observed_occupied. Requires static_occupancy mapping."};
+
+constexpr Param<float>::Description kObservationFreeThresholdLogOddsParamDesc{
+  "observation_free_threshold_log_odds", 0.0F,
+  "Occupancy log-odds threshold for classifying a voxel as observed-free "
+  "vs observed-occupied in the observation state output. Voxels with "
+  "log_odds <= threshold are free (1), above are occupied (2). "
+  "Only used when publish_observation_state is true."};
+
 // ======= OUTPUT PARAMS =======
 constexpr Param<float>::Description kEsdfAndGradientsUnobservedValueParamDesc{
   "esdf_and_gradients_unobserved_value", -1000.F,
@@ -395,6 +408,8 @@ public:
   Param<float> esdf_3d_radius_z_above{kEsdf3DRadiusZAboveParamDesc};
   Param<float> esdf_3d_radius_z_below{kEsdf3DRadiusZBelowParamDesc};
   Param<float> publish_esdf_3d_grid_rate_hz{kPublishEsdf3DGridRateHzParamDesc};
+  Param<bool> publish_observation_state{kPublishObservationStateParamDesc};
+  Param<float> observation_free_threshold_log_odds{kObservationFreeThresholdLogOddsParamDesc};
 };
 
 /// Container for all node params of the fuser node.

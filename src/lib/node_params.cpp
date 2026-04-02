@@ -167,6 +167,8 @@ void initializeNvbloxNodeParams(
   initParam<float>(node, &params->esdf_3d_radius_z_above, parameter_tree);
   initParam<float>(node, &params->esdf_3d_radius_z_below, parameter_tree);
   initParam<float>(node, &params->publish_esdf_3d_grid_rate_hz, parameter_tree);
+  initParam<bool>(node, &params->publish_observation_state, parameter_tree);
+  initParam<float>(node, &params->observation_free_threshold_log_odds, parameter_tree);
 }
 
 void initializeFuserNodeParams(

@@ -25,6 +25,24 @@
 namespace nvblox {
 namespace conversions {
 
+struct ObservationStateFunctor {
+  explicit ObservationStateFunctor(float _free_threshold_log_odds)
+    : free_threshold_log_odds(_free_threshold_log_odds) {}
+  ~ObservationStateFunctor() = default;
+
+  // Called only for voxels where an occupancy block exists (sensor data
+  // touched this region). Voxels with no allocated block get the
+  // default_value (0.0 = unobserved) from the dense grid conversion.
+  __device__ __inline__ float operator()(const OccupancyVoxel& voxel) const {
+    if (voxel.log_odds > free_threshold_log_odds) {
+      return 2.0f;  // observed occupied
+    }
+    return 1.0f;  // observed free
+  }
+
+  const float free_threshold_log_odds;
+};
+
 struct SignedDistanceFunctor {
   SignedDistanceFunctor(float _voxel_size, float _default_value)
       : voxel_size(_voxel_size), default_value(_default_value) {}
@@ -122,6 +140,23 @@ EsdfAndGradientsConverter::esdfInAabbToMultiArrayMsg(
   cuda_stream.synchronize();
 
   return array_msg;
+}
+
+std::vector<float> EsdfAndGradientsConverter::occupancyObservationStateInAABB(
+    const OccupancyLayer& occupancy_layer,
+    const AxisAlignedBoundingBox& aabb,
+    float free_threshold_log_odds,
+    const CudaStream& cuda_stream) {
+  constexpr float kUnobservedDefault = 0.0f;
+  ObservationStateFunctor obs_op(free_threshold_log_odds);
+  voxelLayerToDenseVoxelGridInAABBAsync(
+    occupancy_layer, aabb, kUnobservedDefault,
+    obs_op, &obs_gpu_grid_, cuda_stream);
+
+  obs_cpu_grid_.copyFromAsync(obs_gpu_grid_, cuda_stream);
+  std::vector<float> result = obs_cpu_grid_.data().toVectorAsync(cuda_stream);
+  cuda_stream.synchronize();
+  return result;
 }
 
 std::vector<BoundingShape> getShapesToClear(

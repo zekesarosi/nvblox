@@ -889,18 +889,62 @@ void NvbloxNode::publishEsdf3DGrid()
   size_t nx = layout.dim.size() >= 1 ? layout.dim[0].size : 0;
   size_t ny = layout.dim.size() >= 2 ? layout.dim[1].size : 0;
   size_t nz = layout.dim.size() >= 3 ? layout.dim[2].size : 0;
+  const size_t total_voxels = nx * ny * nz;
+  const auto & grid_data = response->esdf_and_gradients.data;
+
+  // Optionally query the occupancy layer for observation state.
+  // This gives the adapter the ability to distinguish "sensor confirmed
+  // free but far from any surface" from "truly never observed".
+  const bool include_obs_state =
+    params_.publish_observation_state &&
+    isStaticOccupancy(params_.mapping_type) &&
+    total_voxels > 0;
+
+  std::vector<float> obs_state_data;
+  if (include_obs_state) {
+    timing::Timer obs_timer("ros/esdf/3d_grid_publish/obs_state");
+    const AxisAlignedBoundingBox aabb(
+      Vector3f(request->aabb_min_m.x, request->aabb_min_m.y,
+               request->aabb_min_m.z),
+      Vector3f(request->aabb_min_m.x + request->aabb_size_m.x,
+               request->aabb_min_m.y + request->aabb_size_m.y,
+               request->aabb_min_m.z + request->aabb_size_m.z));
+
+    obs_state_data = esdf_and_gradients_converter_.occupancyObservationStateInAABB(
+      static_mapper_->occupancy_layer(),
+      aabb,
+      params_.observation_free_threshold_log_odds,
+      *cuda_stream_);
+  }
+
+  const bool interleave =
+    include_obs_state && obs_state_data.size() == total_voxels;
 
   std_msgs::msg::Float32MultiArray msg;
   msg.layout = layout;
   msg.layout.data_offset = 4;
 
-  const auto & grid_data = response->esdf_and_gradients.data;
-  msg.data.reserve(4 + grid_data.size());
-  msg.data.push_back(response->voxel_size_m);
-  msg.data.push_back(static_cast<float>(response->origin_m.x));
-  msg.data.push_back(static_cast<float>(response->origin_m.y));
-  msg.data.push_back(static_cast<float>(response->origin_m.z));
-  msg.data.insert(msg.data.end(), grid_data.begin(), grid_data.end());
+  if (interleave) {
+    // 2 floats per voxel: [distance, obs_state, distance, obs_state, ...]
+    // The adapter detects values_per_voxel from (data_size / total_voxels).
+    msg.data.resize(4 + total_voxels * 2);
+    msg.data[0] = response->voxel_size_m;
+    msg.data[1] = static_cast<float>(response->origin_m.x);
+    msg.data[2] = static_cast<float>(response->origin_m.y);
+    msg.data[3] = static_cast<float>(response->origin_m.z);
+    float* out = msg.data.data() + 4;
+    for (size_t i = 0; i < total_voxels; ++i) {
+      out[i * 2]     = grid_data[i];
+      out[i * 2 + 1] = obs_state_data[i];
+    }
+  } else {
+    msg.data.reserve(4 + grid_data.size());
+    msg.data.push_back(response->voxel_size_m);
+    msg.data.push_back(static_cast<float>(response->origin_m.x));
+    msg.data.push_back(static_cast<float>(response->origin_m.y));
+    msg.data.push_back(static_cast<float>(response->origin_m.z));
+    msg.data.insert(msg.data.end(), grid_data.begin(), grid_data.end());
+  }
 
   esdf_3d_grid_publisher_->publish(msg);
 
@@ -908,12 +952,13 @@ void NvbloxNode::publishEsdf3DGrid()
     get_logger(), *get_clock(), 10000,
     "ESDF 3D grid published: %zux%zux%zu voxel=%.2fm "
     "vehicle=[%.1f,%.1f,%.1f] origin=[%.1f,%.1f,%.1f] "
-    "data=%zu bytes subs=%zu",
+    "data=%zu bytes subs=%zu obs_state=%s",
     nx, ny, nz, response->voxel_size_m,
     vehicle_pos.x(), vehicle_pos.y(), vehicle_pos.z(),
     response->origin_m.x, response->origin_m.y, response->origin_m.z,
     msg.data.size() * sizeof(float),
-    esdf_3d_grid_publisher_->get_subscription_count());
+    esdf_3d_grid_publisher_->get_subscription_count(),
+    interleave ? "yes" : "no");
 }
 
 void NvbloxNode::sliceAndPublishEsdf(

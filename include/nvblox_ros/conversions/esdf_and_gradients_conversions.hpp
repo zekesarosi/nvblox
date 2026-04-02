@@ -38,7 +38,8 @@ class EsdfAndGradientsConverter
 {
 public:
   EsdfAndGradientsConverter()
-  : gpu_grid_(MemoryType::kDevice), cpu_grid_(MemoryType::kHost) {}
+  : gpu_grid_(MemoryType::kDevice), cpu_grid_(MemoryType::kHost),
+    obs_gpu_grid_(MemoryType::kDevice), obs_cpu_grid_(MemoryType::kHost) {}
   ~EsdfAndGradientsConverter() = default;
 
   /// @brief Returns the response to a EsdfAndGradients request.
@@ -69,10 +70,29 @@ public:
     const float default_value,             // NOLINT
     const CudaStream & cuda_stream);
 
+  /// Converts occupancy observation state within an AABB to a dense float grid.
+  /// For each voxel, outputs:
+  ///   0.0 = unobserved (no occupancy block allocated for this position)
+  ///   1.0 = observed free  (log_odds <= threshold, sensor saw free space)
+  ///   2.0 = observed occupied (log_odds > threshold, sensor saw an obstacle)
+  /// @param occupancy_layer The occupancy layer to query.
+  /// @param aabb The AABB matching the ESDF query region.
+  /// @param free_threshold_log_odds Log-odds boundary between free and occupied.
+  /// @param cuda_stream The stream to do the conversion on.
+  /// @return Dense vector of observation state floats, same order as ESDF grid.
+  std::vector<float> occupancyObservationStateInAABB(
+    const OccupancyLayer & occupancy_layer,
+    const AxisAlignedBoundingBox & aabb,
+    float free_threshold_log_odds,
+    const CudaStream & cuda_stream);
+
 protected:
-  // Staging space on the device
+  // Staging space on the device (ESDF)
   Unified3DGrid<float> gpu_grid_;
   Unified3DGrid<float> cpu_grid_;
+  // Staging space on the device (observation state)
+  Unified3DGrid<float> obs_gpu_grid_;
+  Unified3DGrid<float> obs_cpu_grid_;
 };
 
 /// @brief Get the list of shapes to clear from the EsdfAndGradients service request.
