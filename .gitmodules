@@ -1,0 +1,4 @@
+[submodule "nvblox_core"]
+	path = nvblox_core
+	url = https://github.com/zekesarosi/nvblox-fork.git
+	branch = humble
