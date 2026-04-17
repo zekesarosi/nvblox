@@ -1007,10 +1007,9 @@ void NvbloxNode::publishEsdf3DGrid()
                request->aabb_min_m.y + request->aabb_size_m.y,
                request->aabb_min_m.z + request->aabb_size_m.z));
 
-    obs_state_data = esdf_and_gradients_converter_.occupancyObservationStateInAABB(
+    obs_state_data = esdf_and_gradients_converter_.occupancyLogOddsInAABB(
       static_mapper_->occupancy_layer(),
       aabb,
-      params_.observation_free_threshold_log_odds,
       *cuda_stream_);
   }
 

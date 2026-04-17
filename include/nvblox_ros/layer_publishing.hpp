@@ -27,6 +27,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <nvblox_msgs/msg/voxel_block_layer.hpp>
+#include "nvblox/core/hash.h"
 #include "nvblox/nvblox.h"
 #include "nvblox_msgs/msg/mesh.hpp"
 #include "nvblox/serialization/layer_serializer_gpu.h"
@@ -77,6 +78,7 @@ private:
   size_t mesh_subscriber_count_ = 0;
 
   // Params
+  MappingType mapping_type_ = MappingType::kStaticTsdf;
   float min_tsdf_weight_ = 0;
   float exclusion_height_m_ = -1.0;
   float exclusion_radius_m_ = -1.0;
@@ -91,6 +93,8 @@ private:
     freespace_layer_publisher_plugin_;
   rclcpp::Publisher<nvblox_msgs::msg::VoxelBlockLayer>::SharedPtr
     dynamic_occupancy_layer_publisher_plugin_;
+  rclcpp::Publisher<nvblox_msgs::msg::VoxelBlockLayer>::SharedPtr
+    static_occupancy_layer_publisher_plugin_;
 
 
   // Publishers using markers (for fallback). The whole layer will be transmitted every time.
@@ -102,6 +106,12 @@ private:
     freespace_layer_publisher_marker_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr
     dynamic_occupancy_layer_publisher_marker_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+    static_occupancy_layer_publisher_marker_;
+
+  Index3DHashMapType<int32_t>::type static_occupancy_block_to_marker_id_;
+  int32_t next_static_occupancy_marker_id_ = 0;
+  size_t static_occupancy_marker_subscriber_count_ = 0;
 };
 
 }  // namespace nvblox

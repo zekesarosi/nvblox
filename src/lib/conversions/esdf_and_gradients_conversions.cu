@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "nvblox_ros/conversions/esdf_and_gradients_conversions.hpp"
 
+#include <limits>
 #include <nvblox/core/types.h>
 #include <nvblox/map/unified_3d_grid.h>
 #include <nvblox/map/voxels.h>
@@ -38,6 +39,12 @@ struct ObservationStateFunctor {
   }
 
   const float free_threshold_log_odds;
+};
+
+struct LogOddsFunctor {
+  __device__ __inline__ float operator()(const OccupancyVoxel& voxel) const {
+    return voxel.log_odds;
+  }
 };
 
 struct SignedDistanceFunctor {
@@ -149,6 +156,24 @@ std::vector<float> EsdfAndGradientsConverter::occupancyObservationStateInAABB(
   voxelLayerToDenseVoxelGridInAABBAsync(
     occupancy_layer, aabb, kUnobservedDefault,
     obs_op, &obs_gpu_grid_, cuda_stream);
+
+  obs_cpu_grid_.copyFromAsync(obs_gpu_grid_, cuda_stream);
+  std::vector<float> result = obs_cpu_grid_.data().toVectorAsync(cuda_stream);
+  cuda_stream.synchronize();
+  return result;
+}
+
+std::vector<float> EsdfAndGradientsConverter::occupancyLogOddsInAABB(
+    const OccupancyLayer& occupancy_layer,
+    const AxisAlignedBoundingBox& aabb,
+    const CudaStream& cuda_stream) {
+  // NaN sentinel for unallocated voxels so the adapter can distinguish
+  // "never allocated" from "allocated with prior log_odds == 0.0".
+  const float kUnobservedDefault = std::numeric_limits<float>::quiet_NaN();
+  LogOddsFunctor log_odds_op;
+  voxelLayerToDenseVoxelGridInAABBAsync(
+    occupancy_layer, aabb, kUnobservedDefault,
+    log_odds_op, &obs_gpu_grid_, cuda_stream);
 
   obs_cpu_grid_.copyFromAsync(obs_gpu_grid_, cuda_stream);
   std::vector<float> result = obs_cpu_grid_.data().toVectorAsync(cuda_stream);

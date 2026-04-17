@@ -78,6 +78,13 @@ public:
     float free_threshold_log_odds,
     const CudaStream & cuda_stream);
 
+  /// Converts occupancy log-odds within an AABB to a dense float grid.
+  /// Unallocated voxels default to 0.0 (prior / unobserved).
+  std::vector<float> occupancyLogOddsInAABB(
+    const OccupancyLayer & occupancy_layer,
+    const AxisAlignedBoundingBox & aabb,
+    const CudaStream & cuda_stream);
+
 protected:
   // Staging space on the device (ESDF)
   Unified3DGrid<float> gpu_grid_;

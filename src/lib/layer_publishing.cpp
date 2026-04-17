@@ -34,6 +34,12 @@ bool hasSubscriber(
   return pub && pub->get_subscription_count() > 0;
 }
 
+bool hasSubscriber(
+  const typename rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub)
+{
+  return pub && pub->get_subscription_count() > 0;
+}
+
 template<typename T>
 T clamp(const T value, const T minval, const T maxval)
 {
@@ -542,6 +548,174 @@ void publishVoxelLayerUsingPlugin(
   publish_timer.Stop();
 }
 
+// Incremental cubelist publishing for the static occupancy layer.
+//
+// Each block in the layer is mapped to a stable marker id so that subsequent
+// publishes UPDATE that block's cubes in place instead of replacing the entire
+// visualization. Blocks that disappear (no occupied voxels left, or
+// deallocated) are explicitly DELETEd. The whole batch is sent atomically as a
+// MarkerArray.
+template<typename LayerType1, typename LayerType2>
+void publishOccupancyLayerUsingMarkerArray(
+  const std::shared_ptr<const SerializedLayer<typename LayerType1::VoxelType>> & serialized_layer1,
+  const std::shared_ptr<const SerializedLayer<typename LayerType2::VoxelType>> & serialized_layer2,
+  const std::vector<Index3D> & blocks_to_remove,
+  const std::string & frame_id,
+  const rclcpp::Time & timestamp,
+  const float block_size,
+  const float voxel_size,
+  const std::string & marker_ns,
+  const std::function<bool(typename LayerType1::VoxelType)> voxel_in_layer1_valid,
+  const std::function<std_msgs::msg::ColorRGBA(typename LayerType2::VoxelType)>
+  voxel_in_layer2_to_color,
+  Index3DHashMapType<int32_t>::type & block_to_marker_id,
+  int32_t & next_marker_id,
+  const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr publisher)
+{
+  if (!hasSubscriber(publisher)) {
+    return;
+  }
+
+  constexpr int kVoxelsPerSide = LayerType1::VoxelBlockType::kVoxelsPerSide;
+  constexpr int kNumVoxels = LayerType1::VoxelBlockType::kNumVoxels;
+  static_assert(
+    kVoxelsPerSide == LayerType2::VoxelBlockType::kVoxelsPerSide,
+    "Layers must have same block dimension");
+
+  const std::vector<Index3D> & block_indices = serialized_layer1->block_indices;
+  CHECK_EQ(block_indices.size(), serialized_layer2->block_indices.size());
+
+  visualization_msgs::msg::MarkerArray array_msg;
+  array_msg.markers.reserve(block_indices.size() + blocks_to_remove.size());
+
+  const float scale = voxel_size - 1E-3F;
+
+  auto make_block_marker = [&](const Index3D & block_index, int32_t id) {
+      visualization_msgs::msg::Marker m;
+      m.header.frame_id = frame_id;
+      m.header.stamp = timestamp;
+      m.ns = marker_ns;
+      m.id = id;
+      m.type = visualization_msgs::msg::Marker::CUBE_LIST;
+      m.lifetime = rclcpp::Duration(0, 0);
+      m.frame_locked = false;
+      m.scale.x = scale;
+      m.scale.y = scale;
+      m.scale.z = scale;
+      m.pose.orientation.w = 1.0;
+      (void)block_index;
+      return m;
+    };
+
+  for (size_t i_block = 0; i_block < block_indices.size(); ++i_block) {
+    const Index3D & block_index = block_indices[i_block];
+
+    const int offset_layer1 = serialized_layer1->block_offsets[i_block];
+    const int num_layer1 =
+      serialized_layer1->block_offsets[i_block + 1] - offset_layer1;
+    const int offset_layer2 = serialized_layer2->block_offsets[i_block];
+    const int num_layer2 =
+      serialized_layer2->block_offsets[i_block + 1] - offset_layer2;
+
+    auto existing_id_it = block_to_marker_id.find(block_index);
+
+    if (num_layer1 != kNumVoxels) {
+      if (existing_id_it != block_to_marker_id.end()) {
+        visualization_msgs::msg::Marker del;
+        del.header.frame_id = frame_id;
+        del.header.stamp = timestamp;
+        del.ns = marker_ns;
+        del.id = existing_id_it->second;
+        del.action = visualization_msgs::msg::Marker::DELETE;
+        array_msg.markers.emplace_back(std::move(del));
+        block_to_marker_id.erase(existing_id_it);
+      }
+      continue;
+    }
+
+    int32_t marker_id;
+    if (existing_id_it != block_to_marker_id.end()) {
+      marker_id = existing_id_it->second;
+    } else {
+      marker_id = next_marker_id++;
+    }
+
+    visualization_msgs::msg::Marker marker = make_block_marker(block_index, marker_id);
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.points.reserve(kNumVoxels);
+    marker.colors.reserve(kNumVoxels);
+
+    const bool layer2_blockwise_available = (num_layer2 == kNumVoxels);
+
+    for (int x = 0; x < kVoxelsPerSide; ++x) {
+      for (int y = 0; y < kVoxelsPerSide; ++y) {
+        for (int z = 0; z < kVoxelsPerSide; ++z) {
+          const int lin_index = z + 8 * y + 64 * x;
+          const typename LayerType1::VoxelType & layer1_voxel =
+            serialized_layer1->voxels[offset_layer1 + lin_index];
+          if (!voxel_in_layer1_valid(layer1_voxel)) {
+            continue;
+          }
+
+          typename LayerType2::VoxelType layer2_voxel;
+          if (layer2_blockwise_available) {
+            layer2_voxel = serialized_layer2->voxels[offset_layer2 + lin_index];
+          }
+
+          const Vector3f pos = getCenterPositionFromBlockIndexAndVoxelIndex(
+            block_size, block_index, {x, y, z});
+
+          geometry_msgs::msg::Point point_msg;
+          point_msg.x = pos(0);
+          point_msg.y = pos(1);
+          point_msg.z = pos(2);
+          marker.points.emplace_back(point_msg);
+          marker.colors.emplace_back(voxel_in_layer2_to_color(layer2_voxel));
+        }
+      }
+    }
+
+    if (marker.points.empty()) {
+      if (existing_id_it != block_to_marker_id.end()) {
+        visualization_msgs::msg::Marker del;
+        del.header.frame_id = frame_id;
+        del.header.stamp = timestamp;
+        del.ns = marker_ns;
+        del.id = existing_id_it->second;
+        del.action = visualization_msgs::msg::Marker::DELETE;
+        array_msg.markers.emplace_back(std::move(del));
+        block_to_marker_id.erase(existing_id_it);
+      }
+      continue;
+    }
+
+    if (existing_id_it == block_to_marker_id.end()) {
+      block_to_marker_id.emplace(block_index, marker_id);
+    }
+    array_msg.markers.emplace_back(std::move(marker));
+  }
+
+  for (const Index3D & block_index : blocks_to_remove) {
+    auto it = block_to_marker_id.find(block_index);
+    if (it == block_to_marker_id.end()) {
+      continue;
+    }
+    visualization_msgs::msg::Marker del;
+    del.header.frame_id = frame_id;
+    del.header.stamp = timestamp;
+    del.ns = marker_ns;
+    del.id = it->second;
+    del.action = visualization_msgs::msg::Marker::DELETE;
+    array_msg.markers.emplace_back(std::move(del));
+    block_to_marker_id.erase(it);
+  }
+
+  if (array_msg.markers.empty()) {
+    return;
+  }
+  publisher->publish(array_msg);
+}
+
 void LayerPublisher::publishMesh(
   std::shared_ptr<SerializedColorMeshLayer> serialized_mesh,
   const std::vector<Index3D> & blocks_to_remove, const float block_size,
@@ -589,7 +763,8 @@ LayerPublisher::LayerPublisher(
   const float exclusion_height_m,
   const float exclusion_radius_m,
   rclcpp::Node * node)
-: min_tsdf_weight_(min_tsdf_weight),
+: mapping_type_(mapping_type),
+  min_tsdf_weight_(min_tsdf_weight),
   exclusion_height_m_(exclusion_height_m),
   exclusion_radius_m_(exclusion_radius_m)
 {
@@ -632,6 +807,15 @@ LayerPublisher::LayerPublisher(
       node->create_publisher<visualization_msgs::msg::Marker>(
       "~/dynamic_occupancy_layer_marker", 1);
   }
+
+  if (isStaticOccupancy(mapping_type)) {
+    static_occupancy_layer_publisher_plugin_ =
+      node->create_publisher<nvblox_msgs::msg::VoxelBlockLayer>(
+      "~/static_occupancy_layer", 1);
+    static_occupancy_layer_publisher_marker_ =
+      node->create_publisher<visualization_msgs::msg::MarkerArray>(
+      "~/static_occupancy_layer_marker", 1);
+  }
 }
 
 
@@ -658,7 +842,9 @@ LayerTypeBitMask LayerPublisher::getLayersToStreamBitMask()
   }
 
   if (hasSubscriber(dynamic_occupancy_layer_publisher_plugin_) ||
-    hasSubscriber(dynamic_occupancy_layer_publisher_marker_))
+    hasSubscriber(dynamic_occupancy_layer_publisher_marker_) ||
+    hasSubscriber(static_occupancy_layer_publisher_plugin_) ||
+    hasSubscriber(static_occupancy_layer_publisher_marker_))
   {
     mask |= LayerType::kOccupancy;
   }
@@ -793,6 +979,56 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
       static_mapper->freespace_layer().voxel_size(),
       FreespaceVoxelFilter(), freespaceVoxelToRgb,
       freespace_layer_publisher_marker_);
+  }
+
+  if (isStaticOccupancy(mapping_type_) && (layers_to_stream & LayerType::kOccupancy)) {
+    timing::Timer publish_timer("ros/publish_static_occupancy_layer");
+    publishVoxelLayerUsingPlugin<OccupancyLayer, OccupancyLayer>(
+      static_mapper->serializedOccupancyLayer(),
+      static_mapper->serializedOccupancyLayer(), kNoFreespaceLayerExclusion,
+      blocks_to_remove_static_mapper,
+      static_mapper->occupancy_layer().block_size(),
+      static_mapper->occupancy_layer().voxel_size(), frame_id, LayerType::kOccupancy, timestamp,
+      OccupancyVoxelFilter(), occupancyVoxelToRgb,
+      static_occupancy_layer_publisher_plugin_);
+
+    if (hasSubscriber(static_occupancy_layer_publisher_marker_)) {
+      const size_t marker_subs =
+        static_occupancy_layer_publisher_marker_->get_subscription_count();
+      if (marker_subs > static_occupancy_marker_subscriber_count_ &&
+        !static_occupancy_block_to_marker_id_.empty())
+      {
+        visualization_msgs::msg::MarkerArray clear_msg;
+        visualization_msgs::msg::Marker delete_all;
+        delete_all.header.frame_id = frame_id;
+        delete_all.header.stamp = timestamp;
+        delete_all.ns = "static_occupancy_layer";
+        delete_all.action = visualization_msgs::msg::Marker::DELETEALL;
+        clear_msg.markers.emplace_back(std::move(delete_all));
+        static_occupancy_layer_publisher_marker_->publish(clear_msg);
+        static_occupancy_block_to_marker_id_.clear();
+        next_static_occupancy_marker_id_ = 0;
+        RCLCPP_INFO(
+          logger,
+          "Static occupancy marker: new subscriber, cleared cache; map will refill "
+          "as the layer streamer cycles through dirty blocks.");
+      }
+      static_occupancy_marker_subscriber_count_ = marker_subs;
+
+      publishOccupancyLayerUsingMarkerArray<OccupancyLayer, OccupancyLayer>(
+        static_mapper->serializedOccupancyLayer(),
+        static_mapper->serializedOccupancyLayer(),
+        blocks_to_remove_static_mapper, frame_id, timestamp,
+        static_mapper->occupancy_layer().block_size(),
+        static_mapper->occupancy_layer().voxel_size(),
+        "static_occupancy_layer",
+        OccupancyVoxelFilter(), occupancyVoxelToRgb,
+        static_occupancy_block_to_marker_id_,
+        next_static_occupancy_marker_id_,
+        static_occupancy_layer_publisher_marker_);
+    } else {
+      static_occupancy_marker_subscriber_count_ = 0;
+    }
   }
 
   if (dynamic_mapper != nullptr && (layers_to_stream & LayerType::kOccupancy)) {
