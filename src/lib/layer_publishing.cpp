@@ -234,6 +234,7 @@ private:
 void createBlockRemovalMsg(
   const std::vector<Index3D> & blocks_to_remove, const std::string & frame_id,
   const rclcpp::Time & timestamp, const float block_size, const float voxel_size,
+  const LayerType layer_type,
   nvblox_msgs::msg::VoxelBlockLayer * msg)
 {
   const size_t num_blocks = blocks_to_remove.size();
@@ -242,10 +243,10 @@ void createBlockRemovalMsg(
   msg->header.frame_id = frame_id;
   msg->block_size_m = block_size;
   msg->voxel_size_m = voxel_size;
+  msg->layer_type = static_cast<int>(layer_type);
   msg->block_indices.resize(num_blocks);
   msg->blocks.resize(num_blocks);
 
-  // Add empty blocks for each index that should be deleted
   for (size_t i_block = 0; i_block < num_blocks; ++i_block) {
     const Index3D & block_index = blocks_to_remove[i_block];
     msg->block_indices[i_block] = conversions::index3DMessageFromIndex3D(block_index);
@@ -428,25 +429,23 @@ void publishVoxelLayerUsingPlugin(
     return;
   }
 
-  /// Remove blocks
   nvblox_msgs::msg::VoxelBlockLayer delete_msg;
-  createBlockRemovalMsg(blocks_to_remove, frame_id, timestamp, block_size, voxel_size, &delete_msg);
+  createBlockRemovalMsg(
+    blocks_to_remove, frame_id, timestamp, block_size, voxel_size, layer_type, &delete_msg);
   publisher->publish(delete_msg);
 
-  /// Add/update blocks
   nvblox_msgs::msg::VoxelBlockLayer update_msg;
 
   const std::vector<Index3D> & block_indices = serialized_layer1->block_indices;
-  const int num_blocks = block_indices.size();
 
-  update_msg.clear = false;  // TODO(tingdahl) make this an option
+  update_msg.clear = false;
   update_msg.header.stamp = timestamp;
   update_msg.header.frame_id = frame_id;
   update_msg.block_size_m = block_size;
   update_msg.voxel_size_m = voxel_size;
-  update_msg.block_indices.resize(num_blocks);
-  update_msg.blocks.resize(num_blocks);
   update_msg.layer_type = static_cast<int>(layer_type);
+  update_msg.block_indices.reserve(block_indices.size());
+  update_msg.blocks.reserve(block_indices.size());
 
   constexpr int kVoxelsPerSide = LayerType1::VoxelBlockType::kVoxelsPerSide;
   constexpr int kNumVoxels = LayerType1::VoxelBlockType::kNumVoxels;
@@ -454,8 +453,6 @@ void publishVoxelLayerUsingPlugin(
     kVoxelsPerSide == LayerType2::VoxelBlockType::kVoxelsPerSide,
     "Layers must have same block dimension");
 
-  // Need same number of blocks in both layers. This should be guaranteed if the
-  // layers where serialized at the same time.
   CHECK_EQ(
     serialized_layer1->block_indices.size(),
     serialized_layer2->block_indices.size());
@@ -467,32 +464,15 @@ void publishVoxelLayerUsingPlugin(
 
   FreespaceVoxelFilter freespace_voxel_filter;
 
-  // Go over all blocks
   timing::Timer block_timer("ros/publish_layer/block_loop");
   for (size_t i_block = 0; i_block < block_indices.size(); ++i_block) {
-    const Index3D & block_index = block_indices[i_block];
-    update_msg.block_indices[i_block] = conversions::index3DMessageFromIndex3D(block_index);
-    update_msg.blocks[i_block] = nvblox_msgs::msg::VoxelBlock();
-
-    //  For the current block: get the offset in the serialized vectors and the number of serialized
-    //  voxels in the block.
     auto [offset_layer1, num_layer1] = getOffsetAndNumVoxelsForBlock<LayerType1>(
-      serialized_layer1,
-      i_block);
-
+      serialized_layer1, i_block);
     auto [offset_layer2, num_layer2] = getOffsetAndNumVoxelsForBlock<LayerType2>(
-      serialized_layer2,
-      i_block);
-
+      serialized_layer2, i_block);
     auto [offset_freespace_layer, num_freespace_layer] =
       getOffsetAndNumVoxelsForBlock<FreespaceLayer>(freespace_layer, i_block);
 
-    // The number of voxels in a block is guaranteed to be zero or kNumVoxels
-    // (we only allocate full blocks).
-    // If the block of layer 1 is not available we skip publishing the voxels.
-    // In contrast, we still publish voxels with missing block in layer 2.
-    // Layer 2 is used to color the voxel visualization and
-    // if it is missing we use the default color.
     if (num_layer1 != kNumVoxels) {
       continue;
     }
@@ -500,14 +480,17 @@ void publishVoxelLayerUsingPlugin(
       continue;
     }
 
-    // For each voxel in the block...
+    const Index3D & block_index = block_indices[i_block];
+    update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
+    update_msg.blocks.emplace_back();
+    nvblox_msgs::msg::VoxelBlock & out_block = update_msg.blocks.back();
+
     for (int x = 0; x < kVoxelsPerSide; ++x) {
       for (int y = 0; y < kVoxelsPerSide; ++y) {
         for (int z = 0; z < kVoxelsPerSide; ++z) {
           const int lin_index = z + 8 * y + 64 * x;
           const typename LayerType1::VoxelType & layer1_voxel =
             serialized_layer1->voxels[offset_layer1 + lin_index];
-          // Reject voxels using the provided functor
           if (!voxel_in_layer1_valid(layer1_voxel)) {
             continue;
           }
@@ -515,8 +498,6 @@ void publishVoxelLayerUsingPlugin(
           if (freespace_layer) {
             const FreespaceVoxel & freespace_voxel =
               freespace_layer.value()->voxels[offset_freespace_layer + lin_index];
-            // Don't visualize voxels free voxels according to the Freespace layer.
-            // Note that that freespace voxel filter returns "false" for free voxels.
             if (!freespace_voxel_filter(freespace_voxel)) {
               continue;
             }
@@ -524,19 +505,15 @@ void publishVoxelLayerUsingPlugin(
 
           typename LayerType2::VoxelType layer2_voxel;
           if (num_layer2 == kNumVoxels) {
-            // Voxels are available.
             layer2_voxel = serialized_layer2->voxels[offset_layer2 + lin_index];
           }
 
-          // Get the voxel centers from the indices
           geometry_msgs::msg::Point32 point_msg;
           point_msg.x = block_index.x() * block_size + x * voxel_size + voxel_size / 2.f;
           point_msg.y = block_index.y() * block_size + y * voxel_size + voxel_size / 2.f;
           point_msg.z = block_index.z() * block_size + z * voxel_size + voxel_size / 2.f;
-          update_msg.blocks[i_block].centers.emplace_back(point_msg);
-
-          update_msg.blocks[i_block].colors.emplace_back(
-            voxel_in_layer2_to_color(layer2_voxel));
+          out_block.centers.emplace_back(point_msg);
+          out_block.colors.emplace_back(voxel_in_layer2_to_color(layer2_voxel));
         }
       }
     }
@@ -617,21 +594,11 @@ void publishOccupancyLayerUsingMarkerArray(
     const int num_layer2 =
       serialized_layer2->block_offsets[i_block + 1] - offset_layer2;
 
-    auto existing_id_it = block_to_marker_id.find(block_index);
-
     if (num_layer1 != kNumVoxels) {
-      if (existing_id_it != block_to_marker_id.end()) {
-        visualization_msgs::msg::Marker del;
-        del.header.frame_id = frame_id;
-        del.header.stamp = timestamp;
-        del.ns = marker_ns;
-        del.id = existing_id_it->second;
-        del.action = visualization_msgs::msg::Marker::DELETE;
-        array_msg.markers.emplace_back(std::move(del));
-        block_to_marker_id.erase(existing_id_it);
-      }
       continue;
     }
+
+    auto existing_id_it = block_to_marker_id.find(block_index);
 
     int32_t marker_id;
     if (existing_id_it != block_to_marker_id.end()) {
