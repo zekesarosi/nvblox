@@ -473,17 +473,17 @@ void publishVoxelLayerUsingPlugin(
     auto [offset_freespace_layer, num_freespace_layer] =
       getOffsetAndNumVoxelsForBlock<FreespaceLayer>(freespace_layer, i_block);
 
+    const Index3D & block_index = block_indices[i_block];
+    update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
+    update_msg.blocks.emplace_back();
+    nvblox_msgs::msg::VoxelBlock & out_block = update_msg.blocks.back();
+
     if (num_layer1 != kNumVoxels) {
       continue;
     }
     if (freespace_layer && num_freespace_layer != num_layer1) {
       continue;
     }
-
-    const Index3D & block_index = block_indices[i_block];
-    update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
-    update_msg.blocks.emplace_back();
-    nvblox_msgs::msg::VoxelBlock & out_block = update_msg.blocks.back();
 
     for (int x = 0; x < kVoxelsPerSide; ++x) {
       for (int y = 0; y < kVoxelsPerSide; ++y) {
@@ -836,6 +836,44 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
   CHECK_NOTNULL(static_mapper);
   LayerTypeBitMask layers_to_stream = getLayersToStreamBitMask();
 
+  bool static_occupancy_plugin_subs_grew = false;
+  bool static_occupancy_marker_subs_grew = false;
+  if (isStaticOccupancy(mapping_type_) && (layers_to_stream & LayerType::kOccupancy)) {
+    const size_t plugin_subs = static_occupancy_layer_publisher_plugin_ ?
+      static_occupancy_layer_publisher_plugin_->get_subscription_count() : 0;
+    const size_t marker_subs = static_occupancy_layer_publisher_marker_ ?
+      static_occupancy_layer_publisher_marker_->get_subscription_count() : 0;
+    static_occupancy_plugin_subs_grew =
+      plugin_subs > static_occupancy_plugin_subscriber_count_;
+    static_occupancy_marker_subs_grew =
+      marker_subs > static_occupancy_marker_subscriber_count_;
+    static_occupancy_plugin_subscriber_count_ = plugin_subs;
+    static_occupancy_marker_subscriber_count_ = marker_subs;
+
+    if (static_occupancy_plugin_subs_grew || static_occupancy_marker_subs_grew) {
+      // Add every allocated occupancy block as a streaming candidate
+      // directly via the LayerStreamer. We deliberately do NOT use
+      // Mapper::markBlocksForUpdate here because that dirties every
+      // initialised tracker (incl. kEsdf), which would force a full
+      // ESDF rebuild as a side effect. Going through the streamer
+      // touches only the kLayerStreamer state.
+      auto * occ_streamer =
+        static_mapper->layer_streamers().getPtr<OccupancyLayer>();
+      if (occ_streamer != nullptr) {
+        const std::vector<Index3D> all_blocks =
+          static_mapper->occupancy_layer().getAllBlockIndices();
+        occ_streamer->markIndicesCandidates(all_blocks);
+        RCLCPP_INFO(
+          logger,
+          "Static occupancy: subscriber rose (plugin=%s, marker=%s); "
+          "re-queued %zu blocks for bandwidth-limited streaming.",
+          static_occupancy_plugin_subs_grew ? "yes" : "no",
+          static_occupancy_marker_subs_grew ? "yes" : "no",
+          all_blocks.size());
+      }
+    }
+  }
+
   /// Mesh is only computed when we're serializing
   if (layers_to_stream & LayerType::kColorMesh) {
     static_mapper->updateColorMesh();
@@ -960,9 +998,11 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
       static_occupancy_layer_publisher_plugin_);
 
     if (hasSubscriber(static_occupancy_layer_publisher_marker_)) {
-      const size_t marker_subs =
-        static_occupancy_layer_publisher_marker_->get_subscription_count();
-      if (marker_subs > static_occupancy_marker_subscriber_count_ &&
+      // On a new subscriber, drop the local block->marker_id cache and
+      // emit DELETEALL so the new client starts from a blank slate.
+      // The full map will then refill from the candidates we re-queued
+      // at the top of this function.
+      if (static_occupancy_marker_subs_grew &&
         !static_occupancy_block_to_marker_id_.empty())
       {
         visualization_msgs::msg::MarkerArray clear_msg;
@@ -978,9 +1018,8 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
         RCLCPP_INFO(
           logger,
           "Static occupancy marker: new subscriber, cleared cache; map will refill "
-          "as the layer streamer cycles through dirty blocks.");
+          "as the bandwidth-limited streamer drains the re-queued blocks.");
       }
-      static_occupancy_marker_subscriber_count_ = marker_subs;
 
       publishOccupancyLayerUsingMarkerArray<OccupancyLayer, OccupancyLayer>(
         static_mapper->serializedOccupancyLayer(),
@@ -993,8 +1032,6 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
         static_occupancy_block_to_marker_id_,
         next_static_occupancy_marker_id_,
         static_occupancy_layer_publisher_marker_);
-    } else {
-      static_occupancy_marker_subscriber_count_ = 0;
     }
   }
 

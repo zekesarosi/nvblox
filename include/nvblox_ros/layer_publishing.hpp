@@ -111,6 +111,8 @@ private:
 
   Index3DHashMapType<int32_t>::type static_occupancy_block_to_marker_id_;
   int32_t next_static_occupancy_marker_id_ = 0;
+
+  size_t static_occupancy_plugin_subscriber_count_ = 0;
   size_t static_occupancy_marker_subscriber_count_ = 0;
 };
 
