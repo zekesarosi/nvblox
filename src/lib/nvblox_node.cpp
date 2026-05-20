@@ -195,6 +195,16 @@ void NvbloxNode::initializeMultiMapper()
   //              and these handles wouldn't be needed.
   static_mapper_ = multi_mapper_.get()->background_mapper();
   dynamic_mapper_ = multi_mapper_.get()->foreground_mapper();
+
+  // ViewCalculator raycast caching keys on (pose, sensor). In sim the vehicle often
+  // hovers before /ouster/points is live; the first integration caches zero blocks
+  // in view and later frames hit that cache while pose is unchanged, so occupancy
+  // never allocates and alter_ego's inflated viz stays empty.
+  if (isStaticOccupancy(params_.mapping_type)) {
+    static_mapper_->lidar_occupancy_integrator().view_calculator().cache_last_viewpoint(
+      false);
+    static_mapper_->occupancy_integrator().view_calculator().cache_last_viewpoint(false);
+  }
 }
 
 void NvbloxNode::subscribeToTopics()

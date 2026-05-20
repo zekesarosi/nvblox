@@ -78,8 +78,11 @@ bool PointcloudConverter::checkLidarPointcloud(
     return true;
   }
 
-  // Go through the pointcloud and check that each point projects to a pixel
-  // center.
+  // Verify that in-range points project into the image. Skip NaNs, short
+  // returns, and FoV-edge outliers; only reject when nothing projects (wrong
+  // width/height/FOV). Gazebo sim lidar can have a few returns outside the
+  // Ouster model at the vertical extremes.
+  int num_projected = 0;
   sensor_msgs::PointCloud2ConstIterator<float> iter_xyz(*pointcloud, "x");
   for (; iter_xyz != iter_xyz.end(); ++iter_xyz) {
     Vector3f point(iter_xyz[0], iter_xyz[1], iter_xyz[2]);
@@ -88,9 +91,12 @@ bool PointcloudConverter::checkLidarPointcloud(
     }
     Vector2f u_C;
     if (!lidar.project(point, &u_C)) {
-      // Point fell outside the FoV specified in the intrinsics.
-      return false;
+      continue;
     }
+    ++num_projected;
+  }
+  if (num_projected == 0) {
+    return false;
   }
   checked_lidar_models_.insert(lidar);
   return true;
