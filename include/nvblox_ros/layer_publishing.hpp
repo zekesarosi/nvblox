@@ -44,10 +44,13 @@ public:
   ///
   /// @param mapping_type Mapping type, used to determine which topics to advertise
   /// @param min_tsdf_weight Min weight for visualized TSDF voxels
+  /// @param static_occupancy_publish_min_log_odds Voxels with log_odds at or
+  ///   below this threshold are not published on the static_occupancy_layer.
   /// @param node ROS node
   LayerPublisher(
     const MappingType mapping_type, const float min_tsdf_weight,
-    const float exclusion_height_m, const float exclusion_radius_m, rclcpp::Node * node);
+    const float exclusion_height_m, const float exclusion_radius_m,
+    const float static_occupancy_publish_min_log_odds, rclcpp::Node * node);
 
   /// Serialize and publish all layers that have active subscribers
   ///
@@ -82,6 +85,7 @@ private:
   float min_tsdf_weight_ = 0;
   float exclusion_height_m_ = -1.0;
   float exclusion_radius_m_ = -1.0;
+  float static_occupancy_publish_min_log_odds_ = 1e-3F;
 
   // Publishers using nvblox plugin. Allows for bandwidth limitation.
   rclcpp::Publisher<nvblox_msgs::msg::Mesh>::SharedPtr mesh_publisher_;

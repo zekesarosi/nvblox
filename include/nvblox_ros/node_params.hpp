@@ -191,6 +191,12 @@ constexpr Param<float>::Description kLayerVisualizationExclusionRadiusMParamDesc
   "layer_visualization_exclusion_radius_m", 5.f,
   "Voxels further from the robot than this value are not visualized."};
 
+constexpr Param<float>::Description kStaticOccupancyPublishMinLogOddsParamDesc{
+  "static_occupancy_publish_min_log_odds", 1e-3f,
+  "Voxels with log_odds at or below this threshold are not published on the "
+  "static_occupancy_layer. Raise above the per-hit log-odds bump to require "
+  "multiple confirming hits before a voxel is broadcast (kills single-hit noise)."};
+
 constexpr Param<float>::Description kMaxBackProjectionDistanceParamDesc{
   "max_back_projection_distance", 5.F,
   "The maximum depth in meters when visualizing the back-projected point cloud."};
@@ -344,6 +350,7 @@ public:
   Param<float> layer_visualization_min_tsdf_weight{kLayerVisualizationMinTsdfWeightParamDesc};
   Param<float> layer_visualization_exclusion_height_m{kLayerVisualizationExclusionHeightMParamDesc};
   Param<float> layer_visualization_exclusion_radius_m{kLayerVisualizationExclusionRadiusMParamDesc};
+  Param<float> static_occupancy_publish_min_log_odds{kStaticOccupancyPublishMinLogOddsParamDesc};
   Param<float> layer_streamer_bandwidth_limit_mbps{kLayerStreamerBandwidthLimitMbpsParamDesc};
 
   // TODO(dtingdahl) handle enum-from-string logic more elegant so we don't need a separate member

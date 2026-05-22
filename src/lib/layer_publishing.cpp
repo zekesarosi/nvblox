@@ -729,11 +729,13 @@ LayerPublisher::LayerPublisher(
   const float min_tsdf_weight,
   const float exclusion_height_m,
   const float exclusion_radius_m,
+  const float static_occupancy_publish_min_log_odds,
   rclcpp::Node * node)
 : mapping_type_(mapping_type),
   min_tsdf_weight_(min_tsdf_weight),
   exclusion_height_m_(exclusion_height_m),
-  exclusion_radius_m_(exclusion_radius_m)
+  exclusion_radius_m_(exclusion_radius_m),
+  static_occupancy_publish_min_log_odds_(static_occupancy_publish_min_log_odds)
 {
   // Mesh publishers
   mesh_publisher_ = node->create_publisher<nvblox_msgs::msg::Mesh>("~/mesh", 1);
@@ -994,7 +996,7 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
       blocks_to_remove_static_mapper,
       static_mapper->occupancy_layer().block_size(),
       static_mapper->occupancy_layer().voxel_size(), frame_id, LayerType::kOccupancy, timestamp,
-      OccupancyVoxelFilter(), occupancyVoxelToRgb,
+      OccupancyVoxelFilter(static_occupancy_publish_min_log_odds_), occupancyVoxelToRgb,
       static_occupancy_layer_publisher_plugin_);
 
     if (hasSubscriber(static_occupancy_layer_publisher_marker_)) {
@@ -1028,7 +1030,7 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
         static_mapper->occupancy_layer().block_size(),
         static_mapper->occupancy_layer().voxel_size(),
         "static_occupancy_layer",
-        OccupancyVoxelFilter(), occupancyVoxelToRgb,
+        OccupancyVoxelFilter(static_occupancy_publish_min_log_odds_), occupancyVoxelToRgb,
         static_occupancy_block_to_marker_id_,
         next_static_occupancy_marker_id_,
         static_occupancy_layer_publisher_marker_);

@@ -94,6 +94,7 @@ void initializeBaseNodeParams(
   initParam<float>(node, &params->layer_visualization_min_tsdf_weight, parameter_tree);
   initParam<float>(node, &params->layer_visualization_exclusion_height_m, parameter_tree);
   initParam<float>(node, &params->layer_visualization_exclusion_radius_m, parameter_tree);
+  initParam<float>(node, &params->static_occupancy_publish_min_log_odds, parameter_tree);
   initParam<float>(node, &params->layer_streamer_bandwidth_limit_mbps, parameter_tree);
   initParam<float>(node, &params->distance_map_unknown_value_optimistic, parameter_tree);
   initParam<float>(node, &params->distance_map_unknown_value_pessimistic, parameter_tree);

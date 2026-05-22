@@ -52,7 +52,7 @@ void testParamSize(const int expected_param_size, const int actual_param_size)
 }
 
 TEST(BaseNodeParams, initialize) {
-  constexpr size_t kExpectedParamSize = 480;
+  constexpr size_t kExpectedParamSize = 512;
   testParamSize(kExpectedParamSize, sizeof(BaseNodeParams));
 
   auto node = std::make_shared<rclcpp::Node>("node", rclcpp::NodeOptions());
@@ -66,6 +66,7 @@ TEST(BaseNodeParams, initialize) {
   testParam<float>(node.get(), params.layer_visualization_min_tsdf_weight);
   testParam<float>(node.get(), params.layer_visualization_exclusion_height_m);
   testParam<float>(node.get(), params.layer_visualization_exclusion_radius_m);
+  testParam<float>(node.get(), params.static_occupancy_publish_min_log_odds);
   testParam<float>(node.get(), params.layer_streamer_bandwidth_limit_mbps);
 
   testStringParam(node.get(), params.esdf_mode_str);
@@ -75,7 +76,7 @@ TEST(BaseNodeParams, initialize) {
 }
 
 TEST(NvbloxNodeParams, initialize) {
-  constexpr size_t kExpectedParamSize = 2128;
+  constexpr size_t kExpectedParamSize = 2160;
   testParamSize(kExpectedParamSize, sizeof(NvbloxNodeParams));
 
   auto node = std::make_shared<rclcpp::Node>("node", rclcpp::NodeOptions());
@@ -134,7 +135,7 @@ TEST(NvbloxNodeParams, initialize) {
 }
 
 TEST(FuserNodeParams, initialize) {
-  constexpr size_t kExpectedParamSize = 920;
+  constexpr size_t kExpectedParamSize = 952;
   testParamSize(kExpectedParamSize, sizeof(FuserNodeParams));
 
   auto node = std::make_shared<rclcpp::Node>("node", rclcpp::NodeOptions());

@@ -35,6 +35,7 @@ FuserNode::FuserNode(const std::string & node_name, std::shared_ptr<CudaStream> 
     params_.layer_visualization_min_tsdf_weight,
     params_.layer_visualization_exclusion_height_m,
     params_.layer_visualization_exclusion_radius_m,
+    params_.static_occupancy_publish_min_log_odds,
     this);
 
   RCLCPP_INFO_STREAM(
