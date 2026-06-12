@@ -154,6 +154,14 @@ constexpr Param<bool>::Description kUseLidarMotionCompensationParamDesc{
   "This undistorts the scan by interpolating poses for each point based on "
   "its timestamp."};
 
+constexpr Param<float>::Description kLidarMotionCompensationMaxScanDurationMsParamDesc{
+  "lidar_motion_compensation_max_scan_duration_ms", 500.0F,
+  "Upper bound (in milliseconds) on the LiDAR scan duration (max relative "
+  "per-point timestamp) for which motion compensation is attempted. A scan "
+  "whose computed duration is non-positive or exceeds this bound is treated as "
+  "having corrupted/converging timestamps and is integrated without motion "
+  "compensation instead of crashing."};
+
 // ======= VISUALIZATION PARAMS =======
 constexpr StringParam::Description kEsdfSliceBoundsVisualizationAttachmentFrameIdParamDesc{
   "esdf_slice_bounds_visualization_attachment_frame_id", "base_link",
@@ -399,6 +407,8 @@ public:
     kLayerVisualizationUndoGammaCorrectionParamDesc};
   Param<bool> output_pessimistic_distance_map{kOutputPessimisticDistanceMap};
   Param<bool> use_lidar_motion_compensation{kUseLidarMotionCompensationParamDesc};
+  Param<float> lidar_motion_compensation_max_scan_duration_ms{
+    kLidarMotionCompensationMaxScanDurationMsParamDesc};
   Param<bool> pointcloud2_timestamps_are_relative{kPointcloud2TimestampsAreRelative};
 
   Param<int> maximum_input_queue_length{kMaximumSensorMessageQueueLengthParamDesc};

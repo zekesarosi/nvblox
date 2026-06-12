@@ -68,8 +68,15 @@ public:
     const Pointcloud & pointcloud,
     sensor_msgs::msg::PointCloud2 * pointcloud_msg);
 
-  // ROS pointcloud to internal pointcloud representation
-  void pointcloudFromPointcloudMsg(
+  // ROS pointcloud to internal pointcloud representation.
+  // Returns true if per-point timestamps were requested and loaded successfully.
+  // When load_per_point_timestamps is false the points are still copied and the
+  // function returns false (since no valid timestamps were loaded). When
+  // load_per_point_timestamps is true but the timestamps are missing or invalid
+  // (e.g. negative relative timestamps caused by converging PTP clocks) the
+  // points are copied without timestamps and the function returns false so the
+  // caller can skip LiDAR motion compensation instead of crashing.
+  bool pointcloudFromPointcloudMsg(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_msg,
     Pointcloud * pointcloud, bool load_per_point_timestamps = true,
     bool pointcloud2_timestamps_are_relative = true);
@@ -103,7 +110,11 @@ private:
   void copyPointsFromPointcloudMsgAsync(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_msg,
     Pointcloud * pointcloud);
-  void copyTimestampsFromPointcloudMsgAsync(
+  // Returns true if valid per-point timestamps were loaded. Returns false
+  // (without copying timestamps to the device) if the message has no timestamp
+  // field or the relative timestamps are invalid (e.g. negative), so the caller
+  // can gracefully skip motion compensation.
+  bool copyTimestampsFromPointcloudMsgAsync(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_msg,
     Pointcloud * pointcloud, bool pointcloud2_timestamps_are_relative);
 

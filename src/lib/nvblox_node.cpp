@@ -1469,25 +1469,64 @@ bool NvbloxNode::processLidarPointcloud(
 
   // Check if LiDAR motion compensation is enabled.
   // Per-point timestamps are only required for motion compensation.
-  const bool use_lidar_motion_compensation = params_.use_lidar_motion_compensation.get();
-  const bool load_per_point_timestamps = use_lidar_motion_compensation;
+  const bool motion_compensation_requested = params_.use_lidar_motion_compensation.get();
+  const bool load_per_point_timestamps = motion_compensation_requested;
 
-  // Convert ROS PointCloud2 to nvblox Pointcloud
+  // Convert ROS PointCloud2 to nvblox Pointcloud.
+  // pointcloudFromPointcloudMsg returns false if the per-point timestamps are
+  // missing or invalid (e.g. negative relative timestamps caused by converging
+  // PTP clocks), in which case we must not attempt motion compensation.
   timing::Timer lidar_conversion_timer("ros/lidar/conversion");
   Pointcloud nvblox_pointcloud(MemoryType::kDevice);
-  pointcloud_converter_.pointcloudFromPointcloudMsg(pointcloud_ptr, &nvblox_pointcloud,
+  const bool per_point_timestamps_valid = pointcloud_converter_.pointcloudFromPointcloudMsg(
+      pointcloud_ptr, &nvblox_pointcloud,
       load_per_point_timestamps, params_.pointcloud2_timestamps_are_relative.get());
   lidar_conversion_timer.Stop();
 
-  // If LiDAR motion compensation is enabled,
-  // we need to get the scan end transform and duration.
+  // Decide whether motion compensation can safely run on this scan. We harden
+  // against converging / corrupted LiDAR timestamps (a known failure mode while
+  // PTP is still converging) by validating the per-point timestamps, the scan
+  // duration, and the scan-end transform. If any of these are invalid we fall
+  // back to integrating the scan without motion compensation instead of
+  // crashing in the (CUDA/CHECK) motion-compensation path.
+  bool use_lidar_motion_compensation = motion_compensation_requested;
   std::optional<Transform> maybe_T_L_S_scanEnd;
   std::optional<Time> maybe_scan_duration_ms;
+
+  if (use_lidar_motion_compensation && !per_point_timestamps_valid) {
+    constexpr int kPublishPeriodMs = 2000;
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), kPublishPeriodMs,
+      "LiDAR per-point timestamps are missing or invalid (possible PTP clock "
+      "convergence). Integrating without motion compensation.");
+    use_lidar_motion_compensation = false;
+  }
+
   if (use_lidar_motion_compensation) {
-    // Get the scan duration.
+    // Get the scan duration (max relative per-point timestamp).
     maybe_scan_duration_ms = conversions::getPointcloudScanDurationMs(nvblox_pointcloud,
         *cuda_stream_);
 
+    // Validate the scan duration is positive and within sane bounds. Converging
+    // timestamps can produce a zero (all timestamps collapse) or absurdly large
+    // scan duration, both of which make motion compensation invalid.
+    const int64_t scan_duration_ms = static_cast<int64_t>(maybe_scan_duration_ms.value());
+    const int64_t max_scan_duration_ms = static_cast<int64_t>(
+      params_.lidar_motion_compensation_max_scan_duration_ms.get());
+    if (scan_duration_ms <= 0 || scan_duration_ms > max_scan_duration_ms) {
+      constexpr int kPublishPeriodMs = 2000;
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), kPublishPeriodMs,
+        "LiDAR scan duration (%ld ms) outside valid range (0, %ld] ms "
+        "(possible PTP clock convergence). Integrating without motion "
+        "compensation.",
+        static_cast<long>(scan_duration_ms), static_cast<long>(max_scan_duration_ms));
+      use_lidar_motion_compensation = false;
+      maybe_scan_duration_ms.reset();
+    }
+  }
+
+  if (use_lidar_motion_compensation) {
     // Calculate the scan end time (header timestamp + scan duration)
     constexpr int64_t kMillisecondsToNanoseconds = 1e6;
     const int64_t scan_end_ns = pointcloud_timestamp.nanoseconds() +
@@ -1500,11 +1539,14 @@ bool NvbloxNode::processLidarPointcloud(
     if (!transformer_.lookupTransformToGlobalFrame(
           target_frame, scan_end_timestamp, &maybe_T_L_S_scanEnd.value()))
     {
-      constexpr int kPublishPeriodMs = 1000;
+      constexpr int kPublishPeriodMs = 2000;
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), kPublishPeriodMs,
-        "Could not look up transform at scan end time.");
-      return false;
+        "Could not look up transform at scan end time. Integrating without "
+        "motion compensation.");
+      use_lidar_motion_compensation = false;
+      maybe_T_L_S_scanEnd.reset();
+      maybe_scan_duration_ms.reset();
     }
   }
 

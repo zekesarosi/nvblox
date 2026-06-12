@@ -202,7 +202,7 @@ void resizeBufferWithCapacityExpansion(unified_vector<T>* buffer, int required_s
 }
 
 // ROS pointcloud to internal pointcloud representation
-void PointcloudConverter::pointcloudFromPointcloudMsg(
+bool PointcloudConverter::pointcloudFromPointcloudMsg(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr& pointcloud_msg,
     Pointcloud* pointcloud, bool load_per_point_timestamps, bool pointcloud2_timestamps_are_relative) {
   CHECK_NOTNULL(pointcloud);
@@ -210,12 +210,18 @@ void PointcloudConverter::pointcloudFromPointcloudMsg(
   // Copy the points from the message to the pointcloud
   copyPointsFromPointcloudMsgAsync(pointcloud_msg, pointcloud);
 
-  // Optionally copy the timestamps from the message to the pointcloud
+  // Optionally copy the timestamps from the message to the pointcloud.
+  // copyTimestampsFromPointcloudMsgAsync returns false (and skips loading the
+  // timestamps) if they are missing or invalid, in which case the caller should
+  // not attempt motion compensation.
+  bool per_point_timestamps_valid = false;
   if (load_per_point_timestamps) {
-    copyTimestampsFromPointcloudMsgAsync(pointcloud_msg, pointcloud, pointcloud2_timestamps_are_relative);
+    per_point_timestamps_valid = copyTimestampsFromPointcloudMsgAsync(
+        pointcloud_msg, pointcloud, pointcloud2_timestamps_are_relative);
   }
 
   cuda_stream_->synchronize();
+  return per_point_timestamps_valid;
 }
 
 void PointcloudConverter::pointsToCubesMarkerMsg(
@@ -266,7 +272,7 @@ void PointcloudConverter::copyPointsFromPointcloudMsgAsync(
 }
 
 
-void PointcloudConverter::copyTimestampsFromPointcloudMsgAsync(
+bool PointcloudConverter::copyTimestampsFromPointcloudMsgAsync(
   const sensor_msgs::msg::PointCloud2::ConstSharedPtr& pointcloud_msg,
   Pointcloud* pointcloud, bool pointcloud2_timestamps_are_relative) {
   CHECK_NOTNULL(pointcloud);
@@ -284,13 +290,26 @@ void PointcloudConverter::copyTimestampsFromPointcloudMsgAsync(
       break;
     }
   }
-  CHECK(has_timestamps) << "No timestamps found in the pointcloud message";
+  // Missing timestamps is not fatal: the caller will fall back to integrating
+  // without motion compensation.
+  if (!has_timestamps) {
+    LOG_FIRST_N(WARNING, 10)
+        << "No per-point timestamps found in the pointcloud message; "
+           "LiDAR motion compensation will be skipped.";
+    return false;
+  }
 
   // Copy timestamps from the message to the pointcloud
   const int num_points = pointcloud_msg->width * pointcloud_msg->height;
   
   // Resize timestamps host buffer
   resizeBufferWithCapacityExpansion(&timestamps_host_, num_points, *cuda_stream_);
+
+  // Whether every loaded relative timestamp is non-negative. Negative relative
+  // timestamps indicate inconsistent header/per-point timestamps (e.g. caused
+  // by PTP clock convergence or a wrong pointcloud2_timestamps_are_relative
+  // setting). When this happens we skip motion compensation rather than abort.
+  bool timestamps_valid = true;
 
   // Lambda template to process timestamps based on type
   auto writeTimestampsToHostBuffer = [&]<typename TimestampType>() {
@@ -306,10 +325,10 @@ void PointcloudConverter::copyTimestampsFromPointcloudMsgAsync(
     int idx = 0;
     for (; iter_t != iter_t.end(); ++iter_t) {
       const int64_t relative_timestamp_ns = static_cast<int64_t>(*iter_t) - offset_to_relative_ns;
+      if (relative_timestamp_ns < 0) {
+        timestamps_valid = false;
+      }
       timestamps_host_[idx] = Time(static_cast<int64_t>(relative_timestamp_ns * kNanoSecondsToMilliSeconds));
-      CHECK_GE(timestamps_host_[idx], Time(0)) 
-          << "Relative timestamp must be positive. "
-          << "Check whether the pointcloud2_timestamps_are_relative param should be set to true.";
       idx++;
     }
   };
@@ -341,11 +360,25 @@ void PointcloudConverter::copyTimestampsFromPointcloudMsgAsync(
       writeTimestampsToHostBuffer.operator()<double>();
       break;
     default:
-      CHECK(false) << "Unsupported timestamp datatype: " << static_cast<int>(timestamp_datatype);
+      // Unsupported datatype is not fatal: skip motion compensation.
+      LOG_FIRST_N(WARNING, 10)
+          << "Unsupported timestamp datatype: "
+          << static_cast<int>(timestamp_datatype)
+          << "; LiDAR motion compensation will be skipped.";
+      return false;
+  }
+
+  if (!timestamps_valid) {
+    LOG_EVERY_N(WARNING, 100)
+        << "Encountered negative relative per-point LiDAR timestamps "
+           "(possible PTP clock convergence, or pointcloud2_timestamps_are_relative "
+           "is misconfigured); LiDAR motion compensation will be skipped.";
+    return false;
   }
 
   // Copy the timestamps to the pointcloud
   pointcloud->copyTimestampsFromAsync(timestamps_host_, *cuda_stream_);
+  return true;
 }
 
 Time getPointcloudScanDurationMs(const Pointcloud& pointcloud, const CudaStream& cuda_stream) {
