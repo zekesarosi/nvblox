@@ -357,6 +357,7 @@ void NvbloxNode::subscribeToTopics()
 void NvbloxNode::advertiseTopics()
 {
   RCLCPP_INFO_STREAM(get_logger(), "NvbloxNode::advertiseTopics()");
+  tick_dt_publisher_ = create_publisher<std_msgs::msg::Float64>("~/debug/tick_dt_ms", 10);
   // Static esdf
   static_esdf_pointcloud_publisher_ =
     create_publisher<sensor_msgs::msg::PointCloud2>("~/static_esdf_pointcloud", 1);
@@ -680,6 +681,22 @@ void NvbloxNode::tick()
       get_logger(), clk, params_.print_statistics_on_console_period_ms,
       "Delay statistics: \n" <<
         nvblox::timing::Delays::Print());
+  }
+
+  // Heartbeat for external liveness monitoring, throttled to ~10 Hz so the
+  // 100 Hz tick loop doesn't publish every iteration. A hung tick stops
+  // refreshing this; the value carries the gap since the last heartbeat.
+  if (const auto tick_now = std::chrono::steady_clock::now();
+    last_tick_time_.time_since_epoch().count() == 0)
+  {
+    last_tick_time_ = tick_now;
+  } else if (const double since_ms = std::chrono::duration<double, std::milli>(
+      tick_now - last_tick_time_).count(); since_ms >= 100.0)
+  {
+    std_msgs::msg::Float64 dt_msg;
+    dt_msg.data = since_ms;
+    tick_dt_publisher_->publish(dt_msg);
+    last_tick_time_ = tick_now;
   }
 
   // Restart the idle timer

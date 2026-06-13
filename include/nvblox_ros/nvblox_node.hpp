@@ -47,6 +47,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
 #include <nvblox_msgs/srv/file_path.hpp>
@@ -418,6 +419,9 @@ protected:
     lidar_image_publisher_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr
     esdf_3d_grid_publisher_;
+  // Main-loop heartbeat (tick interval in ms) for external liveness monitoring.
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr tick_dt_publisher_;
+  std::chrono::steady_clock::time_point last_tick_time_{};
 
   // Services.
   rclcpp::Service<nvblox_msgs::srv::FilePath>::SharedPtr save_ply_service_;
