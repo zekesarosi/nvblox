@@ -473,17 +473,20 @@ void publishVoxelLayerUsingPlugin(
     auto [offset_freespace_layer, num_freespace_layer] =
       getOffsetAndNumVoxelsForBlock<FreespaceLayer>(freespace_layer, i_block);
 
-    const Index3D & block_index = block_indices[i_block];
-    update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
-    update_msg.blocks.emplace_back();
-    nvblox_msgs::msg::VoxelBlock & out_block = update_msg.blocks.back();
-
     if (num_layer1 != kNumVoxels) {
       continue;
     }
     if (freespace_layer && num_freespace_layer != num_layer1) {
       continue;
     }
+
+    // Build the block first. Occupancy (and other filtered layers) may have
+    // zero voxels surviving voxel_in_layer1_valid. Emitting those as empty
+    // VoxelBlocks is indistinguishable from getClearedBlocks removals and
+    // causes downstream adapters to clear occupied cells too early. Only
+    // publish blocks that retain at least one center.
+    nvblox_msgs::msg::VoxelBlock out_block;
+    const Index3D & block_index = block_indices[i_block];
 
     for (int x = 0; x < kVoxelsPerSide; ++x) {
       for (int y = 0; y < kVoxelsPerSide; ++y) {
@@ -517,6 +520,12 @@ void publishVoxelLayerUsingPlugin(
         }
       }
     }
+
+    if (out_block.centers.empty()) {
+      continue;
+    }
+    update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
+    update_msg.blocks.emplace_back(std::move(out_block));
   }
   block_timer.Stop();
 
