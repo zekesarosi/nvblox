@@ -187,6 +187,11 @@ protected:
   virtual void processServiceRequestTaskQueue();
   virtual void processEsdf();
 
+  // Validate lidar_no_return_free_depth_m against the integration range and
+  // push it into the occupancy integrator. Throws if the configuration would
+  // integrate the synthetic no-return surface as an obstacle.
+  void configureLidarMissRayCarving();
+
   // Return true if the time between the two passed timestamps is sufficient to trigger an action
   // under the requested rate.
   bool shouldProcess(

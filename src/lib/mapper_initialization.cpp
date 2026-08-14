@@ -335,6 +335,11 @@ MapperParams getMapperParamsFromROS(const std::string & mapper_name, rclcpp::Nod
     [&](auto value) {
       params.occupancy_integrator_params.occupied_region_half_width_m = value;
     }, node);
+  set_parameter<float>(
+    mapper_name, kMissRayOccupancyProbabilityParamDesc.name,
+    [&](auto value) {
+      params.occupancy_integrator_params.miss_ray_occupancy_probability = value;
+    }, node);
 
   // ======= VIEW CALCULATOR =======
   set_parameter<int>(

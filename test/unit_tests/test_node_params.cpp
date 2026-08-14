@@ -118,6 +118,7 @@ TEST(NvbloxNodeParams, initialize) {
   testParam<float>(node.get(), params.max_angle_above_zero_elevation_rad);
   testParam<bool>(node.get(), params.use_lidar_motion_compensation);
   testParam<bool>(node.get(), params.pointcloud2_timestamps_are_relative);
+  testParam<float>(node.get(), params.lidar_no_return_free_depth_m);
   testParam<float>(node.get(), params.esdf_slice_bounds_visualization_side_length);
   testParam<float>(node.get(), params.workspace_height_bounds_visualization_side_length);
   testParam<float>(node.get(), params.integrate_depth_rate_hz);

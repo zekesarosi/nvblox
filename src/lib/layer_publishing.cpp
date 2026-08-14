@@ -231,27 +231,14 @@ private:
 };
 
 
-void createBlockRemovalMsg(
-  const std::vector<Index3D> & blocks_to_remove, const std::string & frame_id,
-  const rclcpp::Time & timestamp, const float block_size, const float voxel_size,
-  const LayerType layer_type,
-  nvblox_msgs::msg::VoxelBlockLayer * msg)
+// Append a block carrying no voxels, which is how both "this block was
+// deallocated" and "this block has nothing above the publish gate" are encoded
+// on the wire.
+void appendEmptyBlock(
+  const Index3D & block_index, nvblox_msgs::msg::VoxelBlockLayer * msg)
 {
-  const size_t num_blocks = blocks_to_remove.size();
-
-  msg->header.stamp = timestamp;
-  msg->header.frame_id = frame_id;
-  msg->block_size_m = block_size;
-  msg->voxel_size_m = voxel_size;
-  msg->layer_type = static_cast<int>(layer_type);
-  msg->block_indices.resize(num_blocks);
-  msg->blocks.resize(num_blocks);
-
-  for (size_t i_block = 0; i_block < num_blocks; ++i_block) {
-    const Index3D & block_index = blocks_to_remove[i_block];
-    msg->block_indices[i_block] = conversions::index3DMessageFromIndex3D(block_index);
-    msg->blocks[i_block] = nvblox_msgs::msg::VoxelBlock();
-  }
+  msg->block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
+  msg->blocks.emplace_back();
 }
 
 // Convert layer to cubelist marker message for visualization
@@ -423,16 +410,18 @@ void publishVoxelLayerUsingPlugin(
     std_msgs::msg::ColorRGBA(typename LayerType2::VoxelType)>
   voxel_in_layer2_to_color,
   const rclcpp::Publisher<nvblox_msgs::msg::VoxelBlockLayer>::SharedPtr
-  publisher)
+  publisher,
+  Index3DSet * occupancy_destick_blocks = nullptr)
 {
   if (!hasSubscriber(publisher)) {
     return;
   }
 
-  nvblox_msgs::msg::VoxelBlockLayer delete_msg;
-  createBlockRemovalMsg(
-    blocks_to_remove, frame_id, timestamp, block_size, voxel_size, layer_type, &delete_msg);
-  publisher->publish(delete_msg);
+  // Removals ride in the same message as the updates. Publishing them
+  // separately means one logical state change spans two messages, and any
+  // consumer that samples this topic rather than draining it can land on the
+  // removals and never see the updates they were paired with.
+  Index3DSet pending_removals(blocks_to_remove.begin(), blocks_to_remove.end());
 
   nvblox_msgs::msg::VoxelBlockLayer update_msg;
 
@@ -480,11 +469,6 @@ void publishVoxelLayerUsingPlugin(
       continue;
     }
 
-    // Build the block first. Occupancy (and other filtered layers) may have
-    // zero voxels surviving voxel_in_layer1_valid. Emitting those as empty
-    // VoxelBlocks is indistinguishable from getClearedBlocks removals and
-    // causes downstream adapters to clear occupied cells too early. Only
-    // publish blocks that retain at least one center.
     nvblox_msgs::msg::VoxelBlock out_block;
     const Index3D & block_index = block_indices[i_block];
 
@@ -522,10 +506,30 @@ void publishVoxelLayerUsingPlugin(
     }
 
     if (out_block.centers.empty()) {
-      continue;
+      // Occupancy destick: tell the consumer a block went empty only if we
+      // previously told it the block had centers. Announcing every
+      // free-carved block would be pure bandwidth with nothing to retract.
+      if (layer_type == LayerType::kOccupancy && occupancy_destick_blocks &&
+          occupancy_destick_blocks->erase(block_index) > 0) {
+        // keep the empty block
+      } else {
+        continue;
+      }
+    } else if (occupancy_destick_blocks &&
+               layer_type == LayerType::kOccupancy) {
+      occupancy_destick_blocks->insert(block_index);
     }
+    // A block we are republishing supersedes any pending removal for it.
+    pending_removals.erase(block_index);
     update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
     update_msg.blocks.emplace_back(std::move(out_block));
+  }
+
+  for (const Index3D & block_index : pending_removals) {
+    if (occupancy_destick_blocks) {
+      occupancy_destick_blocks->erase(block_index);
+    }
+    appendEmptyBlock(block_index, &update_msg);
   }
   block_timer.Stop();
 
@@ -789,7 +793,8 @@ LayerPublisher::LayerPublisher(
   if (isStaticOccupancy(mapping_type)) {
     static_occupancy_layer_publisher_plugin_ =
       node->create_publisher<nvblox_msgs::msg::VoxelBlockLayer>(
-      "~/static_occupancy_layer", 1);
+      "~/static_occupancy_layer",
+      rclcpp::QoS(rclcpp::KeepLast(16)).reliable());
     static_occupancy_layer_publisher_marker_ =
       node->create_publisher<visualization_msgs::msg::MarkerArray>(
       "~/static_occupancy_layer_marker", 1);
@@ -1006,7 +1011,8 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
       static_mapper->occupancy_layer().block_size(),
       static_mapper->occupancy_layer().voxel_size(), frame_id, LayerType::kOccupancy, timestamp,
       OccupancyVoxelFilter(static_occupancy_publish_min_log_odds_), occupancyVoxelToRgb,
-      static_occupancy_layer_publisher_plugin_);
+      static_occupancy_layer_publisher_plugin_,
+      &static_occupancy_published_blocks_);
 
     if (hasSubscriber(static_occupancy_layer_publisher_marker_)) {
       // On a new subscriber, drop the local block->marker_id cache and

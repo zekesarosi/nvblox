@@ -160,6 +160,7 @@ void initializeNvbloxNodeParams(
   initParam<float>(
     node, &params->lidar_motion_compensation_max_scan_duration_ms, parameter_tree);
   initParam<bool>(node, &params->pointcloud2_timestamps_are_relative, parameter_tree);
+  initParam<float>(node, &params->lidar_no_return_free_depth_m, parameter_tree);
   initParam<float>(node, &params->esdf_slice_bounds_visualization_side_length, parameter_tree);
   initParam<float>(
     node, &params->workspace_height_bounds_visualization_side_length,

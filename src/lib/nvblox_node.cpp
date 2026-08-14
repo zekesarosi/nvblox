@@ -26,6 +26,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -109,6 +110,7 @@ NvbloxNode::NvbloxNode(
 
   // Check if a valid mapping typ was selected
   RCLCPP_INFO_STREAM(get_logger(), "Mapping type: " << toString(params_.mapping_type));
+  configureLidarMissRayCarving();
 
   // Output debug info
   CHECK(parameter_tree_.children().has_value());
@@ -561,6 +563,46 @@ void NvbloxNode::pointcloudCallback(
   pushOntoQueue(
     kPointcloudQueueName, pointcloud, pointcloud_queue_,
     &pointcloud_queue_mutex_);
+}
+
+// The sentinel depth written for no-return beams has to land beyond the far
+// edge of the occupied band, or the synthetic surface itself gets integrated
+// as an obstacle: a shell of phantom occupied voxels at that range, all around
+// the aircraft. Refuse to run in that configuration rather than fly it.
+void NvbloxNode::configureLidarMissRayCarving()
+{
+  const float sentinel_m = params_.lidar_no_return_free_depth_m.get();
+  if (sentinel_m <= 0.f) {
+    RCLCPP_INFO(get_logger(), "LiDAR miss-ray carving disabled (no-return beams are skipped).");
+    return;
+  }
+
+  auto & integrator = static_mapper_->lidar_occupancy_integrator();
+  const float max_integration_m =
+    integrator.max_integration_distance_m();
+  const float min_safe_m =
+    max_integration_m + integrator.occupied_region_half_width_m();
+  if (sentinel_m <= min_safe_m) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "lidar_no_return_free_depth_m=%.1f must exceed "
+      "lidar_projective_integrator_max_integration_distance_m (%.1f) + "
+      "occupied_region_half_width_m (%.1f) = %.1f, otherwise no-return beams "
+      "write a phantom occupied shell at %.1f m.",
+      sentinel_m, max_integration_m, integrator.occupied_region_half_width_m(),
+      min_safe_m, sentinel_m);
+    throw std::invalid_argument("lidar_no_return_free_depth_m is inside the integration range");
+  }
+
+  integrator.miss_ray_sentinel_depth_m(sentinel_m);
+  RCLCPP_INFO(
+    get_logger(),
+    "LiDAR miss-ray carving ON: no-return beams write %.1f m, classified as a "
+    "miss at >= %.1f m, weak free prior p=%.3f (free prior is p=%.3f). "
+    "Carving stops at the %.1f m integration limit.",
+    sentinel_m, integrator.miss_ray_min_depth_m(),
+    integrator.miss_ray_occupancy_probability(),
+    integrator.free_region_occupancy_probability(), max_integration_m);
 }
 
 bool NvbloxNode::shouldProcess(
@@ -1571,7 +1613,8 @@ bool NvbloxNode::processLidarPointcloud(
   timing::Timer lidar_integration_timer("ros/lidar/integration");
   multi_mapper_->integrateDepth(nvblox_pointcloud, T_L_C, lidar,
                                 use_lidar_motion_compensation, maybe_T_L_S_scanEnd,
-                                maybe_scan_duration_ms, update_time_ms);
+                                maybe_scan_duration_ms, update_time_ms,
+                                params_.lidar_no_return_free_depth_m.get());
   timing::Delays::tick(
     "ros/pointcloud_integration",
     nvblox::Time(pointcloud_timestamp.nanoseconds()),
