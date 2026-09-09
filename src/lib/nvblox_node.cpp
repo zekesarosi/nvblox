@@ -594,15 +594,37 @@ void NvbloxNode::configureLidarMissRayCarving()
     throw std::invalid_argument("lidar_no_return_free_depth_m is inside the integration range");
   }
 
+  const float carve_limit_m = integrator.miss_ray_max_carve_distance_m();
+  if (carve_limit_m >= sentinel_m) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "miss_ray_max_carve_distance_m=%.1f must be below "
+      "lidar_no_return_free_depth_m (%.1f); a miss ray cannot carve past the "
+      "sentinel it is marked with.",
+      carve_limit_m, sentinel_m);
+    throw std::invalid_argument("miss_ray_max_carve_distance_m exceeds the no-return sentinel");
+  }
+
   integrator.miss_ray_sentinel_depth_m(sentinel_m);
+  const float effective_carve_m = (carve_limit_m > 0.f) ? carve_limit_m : max_integration_m;
   RCLCPP_INFO(
     get_logger(),
     "LiDAR miss-ray carving ON: no-return beams write %.1f m, classified as a "
     "miss at >= %.1f m, weak free prior p=%.3f (free prior is p=%.3f). "
-    "Carving stops at the %.1f m integration limit.",
+    "Carving stops at %.1f m (%s).",
     sentinel_m, integrator.miss_ray_min_depth_m(),
     integrator.miss_ray_occupancy_probability(),
-    integrator.free_region_occupancy_probability(), max_integration_m);
+    integrator.free_region_occupancy_probability(), effective_carve_m,
+    (carve_limit_m > 0.f) ? "miss_ray_max_carve_distance_m" :
+    "uncapped, so the integration limit");
+  if (carve_limit_m <= 0.f) {
+    RCLCPP_WARN(
+      get_logger(),
+      "miss_ray_max_carve_distance_m is 0, so every no-return beam raycasts to "
+      "%.1f m and allocates the blocks it crosses. Cap it unless you have "
+      "measured the block count and tick time.",
+      max_integration_m);
+  }
 }
 
 bool NvbloxNode::shouldProcess(

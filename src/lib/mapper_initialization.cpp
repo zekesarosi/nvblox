@@ -192,6 +192,8 @@ void declareMapperParameters(const std::string & mapper_name, rclcpp::Node * nod
   declareParameter<float>(mapper_name, kOccupiedRegionOccupancyProbabilityParamDesc, node);
   declareParameter<float>(mapper_name, kUnobservedRegionOccupancyProbabilityParamDesc, node);
   declareParameter<float>(mapper_name, kOccupiedRegionHalfWidthMParamDesc, node);
+  declareParameter<float>(mapper_name, kMissRayOccupancyProbabilityParamDesc, node);
+  declareParameter<float>(mapper_name, kMissRayMaxCarveDistanceMParamDesc, node);
   // ======= VIEW CALCULATOR =======
   declareParameter<int>(mapper_name, kRaycastSubsamplingFactorDesc, node);
   declareParameter<WorkspaceBoundsType, std::string>(
@@ -339,6 +341,11 @@ MapperParams getMapperParamsFromROS(const std::string & mapper_name, rclcpp::Nod
     mapper_name, kMissRayOccupancyProbabilityParamDesc.name,
     [&](auto value) {
       params.occupancy_integrator_params.miss_ray_occupancy_probability = value;
+    }, node);
+  set_parameter<float>(
+    mapper_name, kMissRayMaxCarveDistanceMParamDesc.name,
+    [&](auto value) {
+      params.occupancy_integrator_params.miss_ray_max_carve_distance_m = value;
     }, node);
 
   // ======= VIEW CALCULATOR =======
