@@ -393,6 +393,31 @@ std::tuple<int, int> getOffsetAndNumVoxelsForBlock(
 // color
 // @param block_size                Block size of visualized layer
 // @param marker_msg                Resulting pointcloud message
+// FNV-1a over whichever representation the block carries. Only used to answer
+// "is this byte-identical to what we last sent", so collisions cost a skipped
+// update, not a wrong one.
+inline uint64_t hashVoxelBlockContents(const nvblox_msgs::msg::VoxelBlock & block)
+{
+  uint64_t h = 1469598103934665603ULL;
+  auto mix = [&h](const void * data, size_t n) {
+      const auto * p = static_cast<const uint8_t *>(data);
+      for (size_t i = 0; i < n; ++i) {
+        h = (h ^ p[i]) * 1099511628211ULL;
+      }
+    };
+  if (!block.occupancy.empty()) {
+    mix(block.occupancy.data(), block.occupancy.size());
+  } else {
+    for (const auto & c : block.centers) {
+      mix(&c.x, sizeof(c.x)); mix(&c.y, sizeof(c.y)); mix(&c.z, sizeof(c.z));
+    }
+  }
+  // An empty block is meaningful (a retraction) and must not hash like an
+  // unwritten entry.
+  mix(&h, 0);
+  return h ^ (block.occupancy.empty() ? block.centers.size() : block.occupancy.size());
+}
+
 template<typename LayerType1, typename LayerType2>
 void publishVoxelLayerUsingPlugin(
   const std::shared_ptr<const SerializedLayer<
@@ -411,7 +436,10 @@ void publishVoxelLayerUsingPlugin(
   voxel_in_layer2_to_color,
   const rclcpp::Publisher<nvblox_msgs::msg::VoxelBlockLayer>::SharedPtr
   publisher,
-  Index3DSet * occupancy_destick_blocks = nullptr)
+  Index3DSet * occupancy_destick_blocks = nullptr,
+  const bool use_occupancy_bitmask = false,
+  Index3DHashMapType<uint64_t>::type * sent_hash = nullptr,
+  uint32_t * sequence = nullptr)
 {
   if (!hasSubscriber(publisher)) {
     return;
@@ -433,6 +461,13 @@ void publishVoxelLayerUsingPlugin(
   update_msg.block_size_m = block_size;
   update_msg.voxel_size_m = voxel_size;
   update_msg.layer_type = static_cast<int>(layer_type);
+  if (sequence != nullptr) {
+    update_msg.sequence = ++(*sequence);
+  }
+  update_msg.delta_streaming = sent_hash != nullptr;
+  update_msg.encoding = use_occupancy_bitmask
+    ? nvblox_msgs::msg::VoxelBlockLayer::ENCODING_OCCUPANCY_BITMASK
+    : nvblox_msgs::msg::VoxelBlockLayer::ENCODING_CENTERS;
   update_msg.block_indices.reserve(block_indices.size());
   update_msg.blocks.reserve(block_indices.size());
 
@@ -470,6 +505,7 @@ void publishVoxelLayerUsingPlugin(
     }
 
     nvblox_msgs::msg::VoxelBlock out_block;
+    int num_occupied = 0;
     const Index3D & block_index = block_indices[i_block];
 
     for (int x = 0; x < kVoxelsPerSide; ++x) {
@@ -495,6 +531,17 @@ void publishVoxelLayerUsingPlugin(
             layer2_voxel = serialized_layer2->voxels[offset_layer2 + lin_index];
           }
 
+          if (use_occupancy_bitmask) {
+            // The block index and a fixed 8^3 layout already carry the
+            // position, so only the bit is new information.
+            if (out_block.occupancy.empty()) {
+              out_block.occupancy.assign((kNumVoxels + 7) / 8, 0);
+            }
+            out_block.occupancy[lin_index / 8] |=
+              static_cast<uint8_t>(1u << (lin_index % 8));
+            ++num_occupied;
+            continue;
+          }
           geometry_msgs::msg::Point32 point_msg;
           point_msg.x = block_index.x() * block_size + x * voxel_size + voxel_size / 2.f;
           point_msg.y = block_index.y() * block_size + y * voxel_size + voxel_size / 2.f;
@@ -505,7 +552,9 @@ void publishVoxelLayerUsingPlugin(
       }
     }
 
-    if (out_block.centers.empty()) {
+    const bool block_is_empty =
+      use_occupancy_bitmask ? (num_occupied == 0) : out_block.centers.empty();
+    if (block_is_empty) {
       // Occupancy destick: tell the consumer a block went empty only if we
       // previously told it the block had centers. Announcing every
       // free-carved block would be pure bandwidth with nothing to retract.
@@ -519,6 +568,17 @@ void publishVoxelLayerUsingPlugin(
                layer_type == LayerType::kOccupancy) {
       occupancy_destick_blocks->insert(block_index);
     }
+    // The streamer hands us oldest-first regardless of whether anything
+    // changed, so identical content here means the receiver already has it.
+    if (sent_hash != nullptr) {
+      const uint64_t h = hashVoxelBlockContents(out_block);
+      auto it = sent_hash->find(block_index);
+      if (it != sent_hash->end() && it->second == h) {
+        continue;
+      }
+      (*sent_hash)[block_index] = h;
+    }
+
     // A block we are republishing supersedes any pending removal for it.
     pending_removals.erase(block_index);
     update_msg.block_indices.emplace_back(conversions::index3DMessageFromIndex3D(block_index));
@@ -750,6 +810,38 @@ LayerPublisher::LayerPublisher(
   exclusion_radius_m_(exclusion_radius_m),
   static_occupancy_publish_min_log_odds_(static_occupancy_publish_min_log_odds)
 {
+  occupancy_bitmask_encoding_ =
+    node->has_parameter("occupancy_bitmask_encoding")
+    ? node->get_parameter("occupancy_bitmask_encoding").as_bool()
+    : node->declare_parameter<bool>("occupancy_bitmask_encoding", false);
+  if (occupancy_bitmask_encoding_) {
+    RCLCPP_INFO(
+      node->get_logger(),
+      "Static occupancy layer: packed bitmask encoding (subscribers must "
+      "understand VoxelBlockLayer.encoding)");
+  }
+  occupancy_delta_streaming_ =
+    node->has_parameter("occupancy_delta_streaming")
+    ? node->get_parameter("occupancy_delta_streaming").as_bool()
+    : node->declare_parameter<bool>("occupancy_delta_streaming", false);
+  if (occupancy_delta_streaming_) {
+    RCLCPP_INFO(
+      node->get_logger(),
+      "Static occupancy layer: delta streaming (unchanged blocks suppressed); "
+      "resync via ~/resync_occupancy_layer");
+    occupancy_resync_service_ = node->create_service<std_srvs::srv::Trigger>(
+      "~/resync_occupancy_layer",
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+        // Forget what the receiver has so the streamer's next passes resend
+        // everything. Blocks come back over several messages, not at once.
+        const size_t n = occupancy_sent_hash_.size();
+        occupancy_sent_hash_.clear();
+        res->success = true;
+        res->message = "resync: " + std::to_string(n) + " blocks queued for resend";
+      });
+  }
+
   // Mesh publishers
   mesh_publisher_ = node->create_publisher<nvblox_msgs::msg::Mesh>("~/mesh", 1);
 
@@ -873,6 +965,12 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
       // initialised tracker (incl. kEsdf), which would force a full
       // ESDF rebuild as a side effect. Going through the streamer
       // touches only the kLayerStreamer state.
+      // Re-queueing is not enough under delta streaming: the blocks would be
+      // serialized and then suppressed as unchanged, leaving the new
+      // subscriber with an empty map.
+      if (static_occupancy_plugin_subs_grew) {
+        occupancy_sent_hash_.clear();
+      }
       auto * occ_streamer =
         static_mapper->layer_streamers().getPtr<OccupancyLayer>();
       if (occ_streamer != nullptr) {
@@ -1012,7 +1110,9 @@ void LayerPublisher::serializeAndpublishSubscribedLayers(
       static_mapper->occupancy_layer().voxel_size(), frame_id, LayerType::kOccupancy, timestamp,
       OccupancyVoxelFilter(static_occupancy_publish_min_log_odds_), occupancyVoxelToRgb,
       static_occupancy_layer_publisher_plugin_,
-      &static_occupancy_published_blocks_);
+      &static_occupancy_published_blocks_, occupancy_bitmask_encoding_,
+      occupancy_delta_streaming_ ? &occupancy_sent_hash_ : nullptr,
+      &occupancy_sequence_);
 
     if (hasSubscriber(static_occupancy_layer_publisher_marker_)) {
       // On a new subscriber, drop the local block->marker_id cache and

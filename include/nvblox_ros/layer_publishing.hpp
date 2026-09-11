@@ -27,6 +27,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <nvblox_msgs/msg/voxel_block_layer.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include "nvblox/core/hash.h"
 #include "nvblox/nvblox.h"
 #include "nvblox_msgs/msg/mesh.hpp"
@@ -86,6 +87,20 @@ private:
   float exclusion_height_m_ = -1.0;
   float exclusion_radius_m_ = -1.0;
   float static_occupancy_publish_min_log_odds_ = 1e-3F;
+
+  /// Send occupancy blocks as a packed 512-bit mask instead of a voxel-center
+  /// point list. Both ends must agree; the layer message declares which.
+  bool occupancy_bitmask_encoding_ = false;
+
+  /// Suppress blocks whose contents are byte-identical to what this publisher
+  /// last sent. The streamer refreshes oldest-first regardless of change, so
+  /// without this a settled map is republished forever.
+  bool occupancy_delta_streaming_ = false;
+  Index3DHashMapType<uint64_t>::type occupancy_sent_hash_;
+  /// Monotonic per-publisher counter so a receiver can tell a quiet map from a
+  /// dropped update and ask for a resync.
+  uint32_t occupancy_sequence_ = 0;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr occupancy_resync_service_;
 
   // Publishers using nvblox plugin. Allows for bandwidth limitation.
   rclcpp::Publisher<nvblox_msgs::msg::Mesh>::SharedPtr mesh_publisher_;
