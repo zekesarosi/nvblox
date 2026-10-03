@@ -23,7 +23,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <unordered_set>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -81,12 +80,6 @@ public:
     Pointcloud * pointcloud, bool load_per_point_timestamps = true,
     bool pointcloud2_timestamps_are_relative = true);
 
-  // This function returns true if the pointcloud passed in is consistent with
-  // the LiDAR intrinsics model.
-  bool checkLidarPointcloud(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud,
-    const Lidar & lidar);
-
   // Write the pointcloud to file
   void writeLidarPointcloudToFile(
     const std::string filepath,
@@ -117,8 +110,6 @@ private:
   bool copyTimestampsFromPointcloudMsgAsync(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_msg,
     Pointcloud * pointcloud, bool pointcloud2_timestamps_are_relative);
-
-  std::unordered_set<Lidar, Lidar::Hash> checked_lidar_models_;
 
   std::shared_ptr<CudaStream> cuda_stream_;
 

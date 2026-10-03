@@ -94,6 +94,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   src/lib/conversions/transform_conversions.cpp
   src/lib/layer_publishing.cpp
   src/lib/camera_cache.cpp
+  src/lib/lidar_source.cpp
   src/lib/visualization.cpp
   src/lib/transformer.cpp
   src/lib/utils.cpp

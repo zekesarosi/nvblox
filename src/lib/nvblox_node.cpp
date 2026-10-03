@@ -26,6 +26,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -72,6 +73,7 @@ NvbloxNode::NvbloxNode(
   // Get parameters first (stuff below depends on parameters)
   initializeNvbloxNodeParams(this, &params_, &parameter_tree_);
   CHECK_LE(params_.num_cameras, kMaxNumCameras);
+  initializeLidarSources();
 
   layer_publisher_ = std::make_unique<LayerPublisher>(
     params_.mapping_type,
@@ -217,7 +219,6 @@ void NvbloxNode::subscribeToTopics()
   // Create subscriber queues.
   depth_image_queue_ = std::make_unique<std::list<ImageTypeVariant>>();
   color_image_queue_ = std::make_unique<std::list<ImageTypeVariant>>();
-  pointcloud_queue_ = std::make_unique<std::list<sensor_msgs::msg::PointCloud2::ConstSharedPtr>>();
   esdf_service_queue_ = std::make_unique<std::list<EsdfServiceQueuedType>>();
   file_path_service_queue_ = std::make_unique<std::list<FilePathServiceQueuedType>>();
 
@@ -341,11 +342,16 @@ void NvbloxNode::subscribeToTopics()
     }
   }
 
-  if (params_.use_lidar) {
-    // Subscribe to pointclouds.
-    pointcloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      "pointcloud", input_qos,
-      std::bind(&NvbloxNode::pointcloudCallback, this, std::placeholders::_1));
+  for (auto & source : lidar_sources_) {
+    LidarSource * source_ptr = source.get();
+    source->subscription = create_subscription<sensor_msgs::msg::PointCloud2>(
+      source->config().topic, input_qos,
+      [this, source_ptr](const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+        pointcloudCallback(source_ptr, msg);
+      });
+    RCLCPP_INFO_STREAM(
+      get_logger(), "LiDAR source " << source->name() << " subscribed to "
+                                    << source->subscription->get_topic_name());
   }
 
   // Subscribe to transforms.
@@ -396,9 +402,9 @@ void NvbloxNode::advertiseTopics()
     create_publisher<sensor_msgs::msg::PointCloud2>("~/groundplane_estimator_ground_pointcloud", 1);
   tsdf_zero_crossings_ground_plane_publisher_ =
     create_publisher<visualization_msgs::msg::Marker>("~/groundplane_estimator_estimated_plane", 1);
-  if (params_.use_lidar) {
-    lidar_image_publisher_ = create_publisher<sensor_msgs::msg::Image>(
-          "~/lidar_image", 1);
+  for (auto & source : lidar_sources_) {
+    source->depth_image_publisher =
+      create_publisher<sensor_msgs::msg::Image>(source->debugTopic("depth_image"), 1);
   }
   if (params_.output_pessimistic_distance_map) {
     pessimistic_static_esdf_pointcloud_publisher_ =
@@ -549,20 +555,56 @@ void NvbloxNode::colorImageCallback(
     color_image_queue_, &color_queue_mutex_);
 }
 
+void NvbloxNode::initializeLidarSources()
+{
+  if (!params_.use_lidar) {
+    return;
+  }
+  // Default source keeps the legacy "pointcloud" topic.
+  rcl_interfaces::msg::ParameterDescriptor desc;
+  desc.description =
+    "Names of the LiDARs feeding the map. Each reads lidars.<name>.* with the "
+    "node-wide lidar_* params as defaults.";
+  const auto names = declare_parameter<std::vector<std::string>>(
+    "lidar_names", std::vector<std::string>{"pointcloud"}, desc);
+  if (names.empty()) {
+    throw std::invalid_argument("use_lidar is true but lidar_names is empty");
+  }
+  for (const auto & name : names) {
+    for (const auto & existing : lidar_sources_) {
+      if (existing->name() == name) {
+        throw std::invalid_argument("lidar_names lists '" + name + "' twice");
+      }
+    }
+    lidar_sources_.push_back(
+      std::make_unique<LidarSource>(declareLidarSourceConfig(this, name, params_)));
+    RCLCPP_INFO_STREAM(
+      get_logger(), "LiDAR source " << toString(lidar_sources_.back()->config()));
+  }
+}
+
 void NvbloxNode::pointcloudCallback(
-  const sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud)
+  LidarSource * source, const sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud)
 {
   timing::Timer tick_timer("ros/pointcloud_callback");
   timing::Rates::tick("ros/pointcloud_callback");
+  ++source->stats.received;
+  if (pointcloud->header.stamp.sec < 0) {
+    // rclcpp::Time throws on a negative stamp; drop the scan, not the node.
+    ++source->stats.rejected_stamp;
+    return;
+  }
   const rclcpp::Time pointcloud_stamp(pointcloud->header.stamp.sec,
     pointcloud->header.stamp.nanosec);
   timing::Delays::tick(
     "ros/pointcloud_callback", nvblox::Time(pointcloud_stamp.nanoseconds()),
     nvblox::Time(now().nanoseconds()));
 
-  pushOntoQueue(
-    kPointcloudQueueName, pointcloud, pointcloud_queue_,
-    &pointcloud_queue_mutex_);
+  if (pushOntoQueue(
+      source->queue_name(), pointcloud, source->queue(), source->queue_mutex()))
+  {
+    ++source->stats.dropped_queue;
+  }
 }
 
 // The sentinel depth written for no-return beams has to land beyond the far
@@ -746,6 +788,18 @@ void NvbloxNode::tick()
       "Delay statistics: \n" <<
         nvblox::timing::Delays::Print());
   }
+  if (const auto steady_now = std::chrono::steady_clock::now();
+    params_.print_rates_to_console && !lidar_sources_.empty() &&
+    steady_now - last_lidar_stats_print_ >=
+    std::chrono::milliseconds(params_.print_statistics_on_console_period_ms))
+  {
+    last_lidar_stats_print_ = steady_now;
+    std::ostringstream lidar_stats;
+    for (const auto & source : lidar_sources_) {
+      lidar_stats << "\n  " << toString(*source);
+    }
+    RCLCPP_INFO_STREAM(get_logger(), "LiDAR sources:" << lidar_stats.str());
+  }
 
   // Heartbeat for external liveness monitoring, throttled to ~10 Hz so the
   // 100 Hz tick loop doesn't publish every iteration. A hung tick stops
@@ -824,15 +878,16 @@ void NvbloxNode::processColorQueue()
 
 void NvbloxNode::processPointcloudQueue()
 {
-  using PointcloudMsg = sensor_msgs::msg::PointCloud2::ConstSharedPtr;
+  using PointcloudMsg = LidarSource::PointcloudMsg;
   auto message_ready = [this](const PointcloudMsg & msg) {
       return this->canTransform(msg->header.frame_id, msg->header.stamp);
     };
-  processQueue<PointcloudMsg>(
-    pointcloud_queue_,          // NOLINT
-    &pointcloud_queue_mutex_,    // NOLINT
-    message_ready,             // NOLINT
-    std::bind(&NvbloxNode::processLidarPointcloud, this, std::placeholders::_1));
+  for (auto & source : lidar_sources_) {
+    LidarSource & s = *source;
+    processQueue<PointcloudMsg>(
+      s.queue(), s.queue_mutex(), message_ready,
+      [this, &s](const PointcloudMsg & msg) {return processLidarPointcloud(s, msg);});
+  }
 }
 
 void NvbloxNode::processServiceRequestTaskQueue()
@@ -1487,29 +1542,39 @@ bool NvbloxNode::processColorImage(const ImageTypeVariant & color_msg)
 }
 
 bool NvbloxNode::processLidarPointcloud(
-  const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_ptr)
+  LidarSource & source, const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_ptr)
 {
   timing::Timer ros_lidar_timer("ros/lidar");
   timing::Timer transform_timer("ros/lidar/transform");
-  timing::Rates::tick("ros/lidar");
+  timing::Rates::tick(source.rate_key());
 
-  // Check if the message is too soon, and if it is discard it
+  // Check if the message is too soon for this source, and if it is discard it.
   const rclcpp::Time pointcloud_timestamp = pointcloud_ptr->header.stamp;
   if (!shouldProcess(
-      pointcloud_timestamp, integrate_lidar_last_time_,
-      params_.integrate_lidar_rate_hz))
+      pointcloud_timestamp, source.last_integrated_time,
+      source.config().integrate_rate_hz))
   {
     // To discard we indicate that the image was processed, without actually integrating it.
+    ++source.stats.skipped_rate;
     return true;
   }
   if (pointcloud_timestamp <= shape_clearing_last_time_) {
     // Discard images older then the last shape clearing (would reintegrate cleared shapes).
+    ++source.stats.skipped_shape_clearing;
     return true;
   }
-  // Get the TF for this image.
+
+  if (const rclcpp::Time now = get_clock()->now(); source.validationDue(now)) {
+    validateLidarSource(source, *pointcloud_ptr, now);
+  }
+  if (source.rejected()) {
+    ++source.stats.rejected_model;
+    return true;
+  }
+
+  // Get the TF for this scan.
   const std::string target_frame = pointcloud_ptr->header.frame_id;
   Transform T_L_C;
-  // Get the timestamp
   constexpr int64_t kNanoSecondsToMilliSeconds = 1e6;
   nvblox::Time update_time_ms(pointcloud_timestamp.nanoseconds() / kNanoSecondsToMilliSeconds);
 
@@ -1517,40 +1582,16 @@ bool NvbloxNode::processLidarPointcloud(
       target_frame, pointcloud_timestamp,
       &T_L_C))
   {
+    ++source.stats.skipped_tf;
     return false;
   }
 
   transform_timer.Stop();
 
-  // Create the LiDAR model. The method of creation depends on whether we have
-  // equal FoV above and below 0 elevation. This is specified through a param.
-  Lidar lidar =
-    (params_.use_non_equal_vertical_fov_lidar_params) ?
-    Lidar(
-    params_.lidar_width, params_.lidar_height, params_.lidar_min_valid_range_m,
-    params_.min_angle_below_zero_elevation_rad,
-    params_.max_angle_above_zero_elevation_rad) :
-    Lidar(
-    params_.lidar_width, params_.lidar_height, params_.lidar_min_valid_range_m,
-    params_.lidar_vertical_fov_rad);
+  const Lidar & lidar = source.lidar();
 
-  // We check that the pointcloud is consistent with this LiDAR model
-  // NOTE(alexmillane): If the check fails we return true which indicates that
-  // this pointcloud can be removed from the queue even though it wasn't
-  // integrated (because the intrisics model is messed up).
-  // NOTE(alexmillane): Note that internally we cache checks, so each LiDAR
-  // intrisics model is only tested against a single pointcloud. This is because
-  // the check is expensive to perform.
-  if (!pointcloud_converter_.checkLidarPointcloud(pointcloud_ptr, lidar)) {
-    RCLCPP_ERROR_ONCE(
-      get_logger(), "LiDAR intrinsics are inconsistent with the received "
-      "pointcloud. Failing integration.");
-    return true;
-  }
-
-  // Check if LiDAR motion compensation is enabled.
   // Per-point timestamps are only required for motion compensation.
-  const bool motion_compensation_requested = params_.use_lidar_motion_compensation.get();
+  const bool motion_compensation_requested = source.config().use_motion_compensation;
   const bool load_per_point_timestamps = motion_compensation_requested;
 
   // Convert ROS PointCloud2 to nvblox Pointcloud.
@@ -1578,8 +1619,8 @@ bool NvbloxNode::processLidarPointcloud(
     constexpr int kPublishPeriodMs = 2000;
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), kPublishPeriodMs,
-      "LiDAR per-point timestamps are missing or invalid (possible PTP clock "
-      "convergence). Integrating without motion compensation.");
+      "LiDAR %s per-point timestamps are missing or invalid (possible PTP clock "
+      "convergence). Integrating without motion compensation.", source.name().c_str());
     use_lidar_motion_compensation = false;
   }
 
@@ -1598,9 +1639,9 @@ bool NvbloxNode::processLidarPointcloud(
       constexpr int kPublishPeriodMs = 2000;
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), kPublishPeriodMs,
-        "LiDAR scan duration (%ld ms) outside valid range (0, %ld] ms "
+        "LiDAR %s scan duration (%ld ms) outside valid range (0, %ld] ms "
         "(possible PTP clock convergence). Integrating without motion "
-        "compensation.",
+        "compensation.", source.name().c_str(),
         static_cast<long>(scan_duration_ms), static_cast<long>(max_scan_duration_ms));
       use_lidar_motion_compensation = false;
       maybe_scan_duration_ms.reset();
@@ -1623,12 +1664,15 @@ bool NvbloxNode::processLidarPointcloud(
       constexpr int kPublishPeriodMs = 2000;
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), kPublishPeriodMs,
-        "Could not look up transform at scan end time. Integrating without "
-        "motion compensation.");
+        "LiDAR %s: could not look up transform at scan end time. Integrating "
+        "without motion compensation.", source.name().c_str());
       use_lidar_motion_compensation = false;
       maybe_T_L_S_scanEnd.reset();
       maybe_scan_duration_ms.reset();
     }
+  }
+  if (motion_compensation_requested && !use_lidar_motion_compensation) {
+    ++source.stats.motion_compensation_fallbacks;
   }
 
   // Integrate pointcloud
@@ -1636,23 +1680,25 @@ bool NvbloxNode::processLidarPointcloud(
   multi_mapper_->integrateDepth(nvblox_pointcloud, T_L_C, lidar,
                                 use_lidar_motion_compensation, maybe_T_L_S_scanEnd,
                                 maybe_scan_duration_ms, update_time_ms,
-                                params_.lidar_no_return_free_depth_m.get());
+                                source.no_return_beams());
   timing::Delays::tick(
-    "ros/pointcloud_integration",
+    source.delay_key(),
     nvblox::Time(pointcloud_timestamp.nanoseconds()),
     nvblox::Time(now().nanoseconds()));
   newest_integrated_depth_time_ = std::max(pointcloud_timestamp, newest_integrated_depth_time_);
-  integrate_lidar_last_time_ = pointcloud_timestamp;
+  source.last_integrated_time = pointcloud_timestamp;
+  ++source.stats.integrated;
   lidar_integration_timer.Stop();
 
-  // Publish the depth frame created from the lidar pointcloud.
-  if (lidar_image_publisher_->get_subscription_count() > 0) {
+  // The mapper keeps one shared depth frame; publish before the next scan.
+  if (source.depth_image_publisher->get_subscription_count() > 0) {
     sensor_msgs::msg::Image depth_img_msg;
     conversions::imageMessageFromDepthImage(
       multi_mapper_->getLastDepthFrameFromPointcloud(), pointcloud_ptr->header.frame_id,
         &depth_img_msg,
       *cuda_stream_);
-    lidar_image_publisher_->publish(depth_img_msg);
+    depth_img_msg.header.stamp = pointcloud_ptr->header.stamp;
+    source.depth_image_publisher->publish(depth_img_msg);
   }
 
   // Publish back projected depth lidar image for debugging
@@ -1672,6 +1718,80 @@ bool NvbloxNode::processLidarPointcloud(
   }
 
   return true;
+}
+
+void NvbloxNode::validateLidarSource(
+  LidarSource & source, const sensor_msgs::msg::PointCloud2 & pointcloud,
+  const rclcpp::Time & now)
+{
+  timing::Timer timer("ros/lidar/validate_source");
+  constexpr int kThrottleMs = 5000;
+  // Sparse scans (open sky, spin-up) can't judge the model or the layout.
+  constexpr int kMinPointsToDecide = 1000;
+  const LidarCloudCheck check = checkCloudAgainstLidar(pointcloud, source.lidar());
+
+  if (!check.intrinsics_ok) {
+    if (check.num_valid_points < kMinPointsToDecide) {
+      source.markPending(now);
+      return;
+    }
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), kThrottleMs,
+      "LiDAR %s (%s): %d in-range returns but none project into the %dx%d model. "
+      "Check lidars.%s.* against the sensor's mode. Dropping its scans until a "
+      "scan fits.",
+      source.name().c_str(), pointcloud.header.frame_id.c_str(), check.num_valid_points,
+      source.lidar().cols(), source.lidar().rows(), source.name().c_str());
+    source.markRejected(now);
+    return;
+  }
+
+  const bool carving_wanted = params_.lidar_no_return_free_depth_m.get() > 0.f &&
+    source.config().miss_ray_carving;
+  if (!carving_wanted || !check.organized) {
+    source.markValidated(NoReturnBeams());
+    RCLCPP_INFO(
+      get_logger(), "LiDAR %s (%s): model fits, miss-ray carving off (%s).",
+      source.name().c_str(), pointcloud.header.frame_id.c_str(),
+      !carving_wanted ? "not requested" : "cloud is not organized as rows x cols");
+    if (carving_wanted) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "LiDAR %s: miss-ray carving needs an organized %dx%d cloud; publish it "
+        "destaggered and organized.",
+        source.name().c_str(), source.lidar().rows(), source.lidar().cols());
+    }
+    return;
+  }
+
+  // No-returns are placed by index, so the layout must explain the returns.
+  constexpr float kMinLayoutMatchFraction = 0.9f;
+  if (check.num_projected_points < kMinPointsToDecide) {
+    source.markPending(now);
+    return;
+  }
+  if (check.layout_match_fraction < kMinLayoutMatchFraction) {
+    source.markPending(now);
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), kThrottleMs,
+      "LiDAR %s (%s): no row/column orientation of the organized cloud explains "
+      "more than %.1f%% of returns, so no-return beams cannot be placed on their "
+      "bearing. Miss-ray carving stays off for this source.",
+      source.name().c_str(), pointcloud.header.frame_id.c_str(),
+      100.f * check.layout_match_fraction);
+    return;
+  }
+
+  NoReturnBeams no_return_beams = check.layout;
+  no_return_beams.depth_m = params_.lidar_no_return_free_depth_m.get();
+  source.markValidated(no_return_beams);
+  RCLCPP_INFO(
+    get_logger(),
+    "LiDAR %s (%s): %d valid points, layout col_offset=%d col_reversed=%s "
+    "row_reversed=%s explains %.1f%% of returns, miss-ray carving ON.",
+    source.name().c_str(), pointcloud.header.frame_id.c_str(), check.num_valid_points,
+    check.layout.col_offset, check.layout.col_reversed ? "yes" : "no",
+    check.layout.row_reversed ? "yes" : "no", 100.f * check.layout_match_fraction);
 }
 
 void NvbloxNode::publishLayers()

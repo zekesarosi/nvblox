@@ -62,6 +62,7 @@
 #include "nvblox_ros/mapper_initialization.hpp"
 #include "nvblox_ros/transformer.hpp"
 #include "nvblox_ros/camera_cache.hpp"
+#include "nvblox_ros/lidar_source.hpp"
 #include "nvblox_ros/node_params.hpp"
 #include "nvblox_ros/service_request_task.hpp"
 
@@ -81,6 +82,7 @@ public:
 
   // Setup. These are called by the constructor.
   void initializeMultiMapper();
+  void initializeLidarSources();
   void subscribeToTopics();
   void advertiseTopics();
   void advertiseServices();
@@ -133,7 +135,7 @@ public:
     const sensor_msgs::msg::Image::ConstSharedPtr & color_image,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & color_camera_info);
   void pointcloudCallback(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud);
+    LidarSource * source, const sensor_msgs::msg::PointCloud2::ConstSharedPtr pointcloud);
 
   void savePly(
     const std::shared_ptr<nvblox_msgs::srv::FilePath::Request> request,
@@ -167,7 +169,7 @@ public:
   virtual bool processDepthImage(const ImageTypeVariant & depth_mask_msg);
   virtual bool processColorImage(const ImageTypeVariant & color_mask_msg);
   virtual bool processLidarPointcloud(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_ptr);
+    LidarSource & source, const sensor_msgs::msg::PointCloud2::ConstSharedPtr & pointcloud_ptr);
 
   // Return true if the tf-tree contains a transform for the given frame_id and timestamp
   bool canTransform(const std::string & frame_id, const rclcpp::Time & timestamp);
@@ -191,6 +193,11 @@ protected:
   // push it into the occupancy integrator. Throws if the configuration would
   // integrate the synthetic no-return surface as an obstacle.
   void configureLidarMissRayCarving();
+
+  // Fit the source's layout and decide whether miss-ray carving is safe.
+  void validateLidarSource(
+    LidarSource & source, const sensor_msgs::msg::PointCloud2 & pointcloud,
+    const rclcpp::Time & now);
 
   // Return true if the time between the two passed timestamps is sufficient to trigger an action
   // under the requested rate.
@@ -242,8 +249,9 @@ protected:
   /// @param item Item to be added to the queue.
   /// @param queue_ptr Queue where to add the item.
   /// @param queue_mutex_ptr Mutex protecting the queue.
+  /// @return True if the oldest item was evicted to make room.
   template<typename QueuedType>
-  void pushOntoQueue(
+  bool pushOntoQueue(
     const std::string & queue_name,
     QueuedType item,
     std::unique_ptr<std::list<QueuedType>> & queue_ptr,
@@ -369,9 +377,9 @@ protected:
   std::vector<std::shared_ptr<image_approx_sync>> timesync_color_;
 
 
-  // Pointcloud sub.
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
-    pointcloud_sub_;
+  // One entry per LiDAR feeding the map, in lidar_names order.
+  std::vector<std::unique_ptr<LidarSource>> lidar_sources_;
+  std::chrono::steady_clock::time_point last_lidar_stats_print_{};
 
   // Optional transform subs.
   rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr
@@ -420,8 +428,6 @@ protected:
     tsdf_zero_crossings_ground_plane_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
     tsdf_zero_crossings_pointcloud_publisher_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
-    lidar_image_publisher_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr
     esdf_3d_grid_publisher_;
   // Main-loop heartbeat (tick interval in ms) for external liveness monitoring.
@@ -453,7 +459,6 @@ protected:
   /// of the camera to the timestamp of the last image integrated from that camera.
   std::unordered_map<std::string, rclcpp::Time> integrate_depth_last_times_;
   std::unordered_map<std::string, rclcpp::Time> integrate_color_last_times_;
-  rclcpp::Time integrate_lidar_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time update_mesh_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time update_esdf_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time publish_layer_last_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
@@ -513,7 +518,6 @@ protected:
       nvblox_msgs::srv::FilePath>>;
 
   // Input queues. Unique pointers are used to enable more flexibility when deallocating.
-  std::unique_ptr<std::list<sensor_msgs::msg::PointCloud2::ConstSharedPtr>> pointcloud_queue_;
   std::unique_ptr<std::list<EsdfServiceQueuedType>> esdf_service_queue_;
   std::unique_ptr<std::list<FilePathServiceQueuedType>> file_path_service_queue_;
   std::unique_ptr<std::list<ImageTypeVariant>> depth_image_queue_;
@@ -523,7 +527,6 @@ protected:
   // Input queue names.
   static constexpr char kDepthQueueName[] = "depth_queue";
   static constexpr char kColorQueueName[] = "color_queue";
-  static constexpr char kPointcloudQueueName[] = "pointcloud_queue";
   static constexpr char kFilePathServiceQueueName[] = "file_path_service_queue";
   static constexpr char kEsdfServiceQueueName[] = "esdf_service_queue";
 
@@ -532,7 +535,6 @@ protected:
   std::mutex color_queue_mutex_;
   std::mutex depth_mask_queue_mutex_;
   std::mutex color_mask_queue_mutex_;
-  std::mutex pointcloud_queue_mutex_;
   std::mutex esdf_service_queue_mutex_;
   std::mutex file_path_service_queue_mutex_;
 

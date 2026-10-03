@@ -15,6 +15,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cstring>
+
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
 #include <thrust/extrema.h>
@@ -69,38 +71,6 @@ PointcloudConverter::PointcloudConverter()
 PointcloudConverter::PointcloudConverter(
     std::shared_ptr<CudaStream> cuda_stream)
     : cuda_stream_(cuda_stream) {}
-
-bool PointcloudConverter::checkLidarPointcloud(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr& pointcloud,
-    const Lidar& lidar) {
-  // Check the cache
-  if (checked_lidar_models_.find(lidar) != checked_lidar_models_.end()) {
-    return true;
-  }
-
-  // Verify that in-range points project into the image. Skip NaNs, short
-  // returns, and FoV-edge outliers; only reject when nothing projects (wrong
-  // width/height/FOV). Gazebo sim lidar can have a few returns outside the
-  // Ouster model at the vertical extremes.
-  int num_projected = 0;
-  sensor_msgs::PointCloud2ConstIterator<float> iter_xyz(*pointcloud, "x");
-  for (; iter_xyz != iter_xyz.end(); ++iter_xyz) {
-    Vector3f point(iter_xyz[0], iter_xyz[1], iter_xyz[2]);
-    if (point.hasNaN() || !lidar.isInValidRange(point)) {
-      continue;
-    }
-    Vector2f u_C;
-    if (!lidar.project(point, &u_C)) {
-      continue;
-    }
-    ++num_projected;
-  }
-  if (num_projected == 0) {
-    return false;
-  }
-  checked_lidar_models_.insert(lidar);
-  return true;
-}
 
 void PointcloudConverter::writeLidarPointcloudToFile(
     const std::string filepath_prefix,
@@ -257,14 +227,37 @@ void PointcloudConverter::copyPointsFromPointcloudMsgAsync(
     // Resize pointcloud host buffer
     resizeBufferWithCapacityExpansion(&points_host_, num_points, *cuda_stream_);
   
-    // Copy points from ROS message to host buffer
-    sensor_msgs::PointCloud2ConstIterator<float> iter_xyz(*pointcloud_msg, "x");
-    int idx = 0;
-    for (; iter_xyz != iter_xyz.end(); ++iter_xyz) {
-      points_host_[idx][0] = iter_xyz[0];
-      points_host_[idx][1] = iter_xyz[1];
-      points_host_[idx][2] = iter_xyz[2];
-      idx++;
+    // Fast path for packed float32 xyz; the iterator is several times slower.
+    const sensor_msgs::msg::PointField * x_field = nullptr;
+    const sensor_msgs::msg::PointField * y_field = nullptr;
+    const sensor_msgs::msg::PointField * z_field = nullptr;
+    for (const auto & field : pointcloud_msg->fields) {
+      if (field.name == "x") {x_field = &field;}
+      if (field.name == "y") {y_field = &field;}
+      if (field.name == "z") {z_field = &field;}
+    }
+    const bool packed_xyz = x_field && y_field && z_field &&
+      x_field->datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+      y_field->datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+      z_field->datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+      y_field->offset == x_field->offset + 4 && z_field->offset == x_field->offset + 8 &&
+      !pointcloud_msg->is_bigendian &&
+      pointcloud_msg->row_step == pointcloud_msg->width * pointcloud_msg->point_step;
+    if (packed_xyz) {
+      const uint8_t * src = pointcloud_msg->data.data() + x_field->offset;
+      const size_t step = pointcloud_msg->point_step;
+      for (int idx = 0; idx < num_points; ++idx, src += step) {
+        std::memcpy(points_host_[idx].data(), src, 3 * sizeof(float));
+      }
+    } else {
+      sensor_msgs::PointCloud2ConstIterator<float> iter_xyz(*pointcloud_msg, "x");
+      int idx = 0;
+      for (; iter_xyz != iter_xyz.end(); ++iter_xyz) {
+        points_host_[idx][0] = iter_xyz[0];
+        points_host_[idx][1] = iter_xyz[1];
+        points_host_[idx][2] = iter_xyz[2];
+        idx++;
+      }
     }
 
     // Copy the points to the pointcloud
@@ -312,24 +305,27 @@ bool PointcloudConverter::copyTimestampsFromPointcloudMsgAsync(
   bool timestamps_valid = true;
 
   // Lambda template to process timestamps based on type
+  uint32_t timestamp_offset = 0;
+  for (const auto & field : pointcloud_msg->fields) {
+    if (field.name == timestamp_field) {timestamp_offset = field.offset;}
+  }
   auto writeTimestampsToHostBuffer = [&]<typename TimestampType>() {
-    // Get the iterator for the timestamps with the appropriate datatype
-    sensor_msgs::PointCloud2ConstIterator<TimestampType> iter_t(*pointcloud_msg, timestamp_field);
-    
-    constexpr double kNanoSecondsToMilliSeconds = 1e-6;
+    constexpr int64_t kNanoSecondsPerMilliSecond = 1000000;
     const rclcpp::Time header_timestamp = pointcloud_msg->header.stamp;
 
     // If the per-point timestamps are absolute, we need to subtract the header timestamp to make them relative.
     // Internally we expect the timestamps to be relative to the scan start.
     const int64_t offset_to_relative_ns = pointcloud2_timestamps_are_relative ? 0 : header_timestamp.nanoseconds();
-    int idx = 0;
-    for (; iter_t != iter_t.end(); ++iter_t) {
-      const int64_t relative_timestamp_ns = static_cast<int64_t>(*iter_t) - offset_to_relative_ns;
+    const uint8_t * src = pointcloud_msg->data.data() + timestamp_offset;
+    const size_t step = pointcloud_msg->point_step;
+    for (int idx = 0; idx < num_points; ++idx, src += step) {
+      TimestampType raw;
+      std::memcpy(&raw, src, sizeof(TimestampType));
+      const int64_t relative_timestamp_ns = static_cast<int64_t>(raw) - offset_to_relative_ns;
       if (relative_timestamp_ns < 0) {
         timestamps_valid = false;
       }
-      timestamps_host_[idx] = Time(static_cast<int64_t>(relative_timestamp_ns * kNanoSecondsToMilliSeconds));
-      idx++;
+      timestamps_host_[idx] = Time(relative_timestamp_ns / kNanoSecondsPerMilliSecond);
     }
   };
 

@@ -66,7 +66,7 @@ void NvbloxNode::processQueue(
 
 
 template<typename QueuedType>
-void NvbloxNode::pushOntoQueue(
+bool NvbloxNode::pushOntoQueue(
   const std::string & queue_name, QueuedType item,
   std::unique_ptr<std::list<QueuedType>> & queue_ptr,
   std::mutex * queue_mutex_ptr)
@@ -81,8 +81,10 @@ void NvbloxNode::pushOntoQueue(
   const int queue_ptr_size = queue_ptr->size();
 
   // Remove oldest item if queue is full
+  bool dropped = false;
   if (queue_ptr_size > params_.maximum_input_queue_length) {
     queue_ptr->pop_front();
+    dropped = true;
     lock.unlock();
 
     // Print some debug info
@@ -99,6 +101,7 @@ void NvbloxNode::pushOntoQueue(
   } else {
     lock.unlock();
   }
+  return dropped;
 }
 
 }  // namespace nvblox
