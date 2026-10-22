@@ -359,7 +359,7 @@ void NvbloxNode::subscribeToTopics()
     "transform", kQueueSize,
     std::bind(&Transformer::transformCallback, &transformer_, std::placeholders::_1));
   pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-    "pose", 10, std::bind(&Transformer::poseCallback, &transformer_, std::placeholders::_1));
+    "pose", input_qos, std::bind(&Transformer::poseCallback, &transformer_, std::placeholders::_1));
 }
 
 void NvbloxNode::advertiseTopics()
